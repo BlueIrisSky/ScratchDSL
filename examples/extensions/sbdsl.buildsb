@@ -1,0 +1,3 @@
+entry: "./main.sbdsl"
+output: "./dist/extensions.sb3"
+extensions: ["./自定义拓展.js"]

@@ -1,0 +1,6 @@
+/dist/
+/.vscode-test/
+/server/*
+!/server/.gitkeep
+/THIRD_PARTY_NOTICES.txt
+/LICENSE

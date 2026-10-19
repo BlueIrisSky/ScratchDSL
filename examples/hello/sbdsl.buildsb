@@ -1,0 +1,2 @@
+entry: "./main.sbdsl"
+output: "./dist/hello.sb3"

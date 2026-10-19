@@ -1,0 +1,14 @@
+@sprite "main" {
+    @init {
+        x: -100
+        y: 0
+        size: 100
+        direction: 90
+        costumes: [
+            {
+                name: "main"
+                path: "../assets/sbdsl.svg"
+            }
+        ]
+    }
+}

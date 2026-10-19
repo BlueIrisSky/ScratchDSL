@@ -1,0 +1,311 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ScratchDSL Build",
+  "scopeName": "source.sbdsl-build",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#root-object"
+    },
+    {
+      "include": "#root-values"
+    }
+  ],
+  "repository": {
+    "root-object": {
+      "name": "meta.structure.dictionary.json",
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.dictionary.begin.json"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.dictionary.end.json"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#root-values"
+        }
+      ]
+    },
+    "root-values": {
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#extension-field"
+        },
+        {
+          "include": "#root-field"
+        },
+        {
+          "include": "#json-values"
+        }
+      ]
+    },
+    "extension-field": {
+      "name": "meta.extension.imports.sbdsl-build",
+      "begin": "(?<![A-Za-z0-9_])(extensions|\"extensions\")([ \\t]*)(:)",
+      "beginCaptures": {
+        "1": {
+          "name": "support.type.property-name.json"
+        },
+        "3": {
+          "name": "punctuation.separator.dictionary.json"
+        }
+      },
+      "end": "(?=(?:[A-Za-z_][A-Za-z0-9_]*|\"(?:[^\"\\\\]|\\\\.)*\")[ \\t]*:|\\})",
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#extension-array"
+        },
+        {
+          "include": "#json-values"
+        }
+      ]
+    },
+    "root-field": {
+      "name": "meta.property.sbdsl-build",
+      "begin": "(?<![A-Za-z0-9_])((?:[A-Za-z_][A-Za-z0-9_]*|\"(?:[^\"\\\\]|\\\\.)*\"))([ \\t]*)(:)",
+      "beginCaptures": {
+        "1": {
+          "name": "support.type.property-name.json",
+          "patterns": [
+            {
+              "include": "#json-escapes"
+            }
+          ]
+        },
+        "3": {
+          "name": "punctuation.separator.dictionary.json"
+        }
+      },
+      "end": "(?=(?:[A-Za-z_][A-Za-z0-9_]*|\"(?:[^\"\\\\]|\\\\.)*\")[ \\t]*:|\\})",
+      "patterns": [
+        {
+          "include": "#json-values"
+        }
+      ]
+    },
+    "extension-array": {
+      "name": "meta.structure.array.json",
+      "begin": "\\[",
+      "end": "\\]",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.array.begin.json"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.array.end.json"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#extension-entry"
+        },
+        {
+          "include": "#json-values"
+        }
+      ]
+    },
+    "extension-entry": {
+      "name": "meta.extension.import.sbdsl-build",
+      "begin": "\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"",
+      "beginCaptures": {
+        "0": {
+          "name": "string.quoted.double.json",
+          "patterns": [
+            {
+              "include": "#json-escapes"
+            }
+          ]
+        }
+      },
+      "end": "(?=[^\\s#])",
+      "applyEndPatternLast": true,
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#extension-alias"
+        }
+      ]
+    },
+    "extension-alias": {
+      "name": "meta.extension.alias.sbdsl-build",
+      "begin": "(?<![^\\s#])as(?=[\\s#]|$)",
+      "beginCaptures": {
+        "0": {
+          "name": "keyword.control.import.sbdsl"
+        }
+      },
+      "end": "(?<=\")|(?=[^\\s#\"])",
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#extension-alias-name"
+        }
+      ]
+    },
+    "extension-alias-name": {
+      "name": "entity.name.namespace.sbdsl",
+      "begin": "\"",
+      "end": "\"|$",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.json"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.json"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#json-escapes"
+        }
+      ]
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.sbdsl",
+          "begin": "^[ \\t]*#[ \\t]*$",
+          "end": "#"
+        },
+        {
+          "name": "comment.block.sbdsl",
+          "match": "#[^#\\r\\n]*#"
+        },
+        {
+          "name": "comment.line.number-sign.sbdsl",
+          "match": "#[^#\\r\\n]*$"
+        }
+      ]
+    },
+    "json-values": {
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "name": "support.type.property-name.json",
+          "match": "(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*(?=[ \\t]*:)"
+        },
+        {
+          "include": "#json-key"
+        },
+        {
+          "include": "#json-string"
+        },
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "name": "meta.structure.dictionary.json",
+          "patterns": [
+            {
+              "include": "#json-values"
+            }
+          ],
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.dictionary.begin.json"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.dictionary.end.json"
+            }
+          }
+        },
+        {
+          "begin": "\\[",
+          "end": "\\]",
+          "name": "meta.structure.array.json",
+          "patterns": [
+            {
+              "include": "#json-values"
+            }
+          ],
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.array.begin.json"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.array.end.json"
+            }
+          }
+        },
+        {
+          "name": "constant.numeric.json",
+          "match": "-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?"
+        },
+        {
+          "name": "constant.language.json",
+          "match": "\\b(?:true|false|null)\\b"
+        },
+        {
+          "name": "punctuation.separator.dictionary.json",
+          "match": "[:,]"
+        },
+        {
+          "name": "invalid.illegal.json",
+          "match": "[^\\s\\[\\]{}\",:#]+"
+        }
+      ]
+    },
+    "json-key": {
+      "name": "support.type.property-name.json",
+      "begin": "\"(?=(?:[^\"\\\\]|\\\\.)*\"\\s*:)",
+      "end": "\"|$",
+      "patterns": [
+        {
+          "include": "#json-escapes"
+        }
+      ]
+    },
+    "json-string": {
+      "name": "string.quoted.double.json",
+      "begin": "\"",
+      "end": "\"|$",
+      "patterns": [
+        {
+          "include": "#json-escapes"
+        }
+      ]
+    },
+    "json-escapes": {
+      "patterns": [
+        {
+          "name": "constant.character.escape.json",
+          "match": "\\\\(?:[\"\\\\/bfnrt]|u[0-9a-fA-F]{4})"
+        },
+        {
+          "name": "invalid.illegal.escape.json",
+          "match": "\\\\."
+        }
+      ]
+    }
+  }
+}

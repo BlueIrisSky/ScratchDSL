@@ -1,0 +1,21 @@
+# Rust build output, local tools, caches and validation reports
+/target/
+
+# Release files and per-project generated output
+dist/
+*.sb3
+*.exe
+*.pdb
+*.vsix
+
+# Temporary files, logs and editor backups
+*.tmp
+*.log
+*.swp
+*.swo
+*~
+node_modules/
+__pycache__/
+.DS_Store
+Thumbs.db
+desktop.ini
