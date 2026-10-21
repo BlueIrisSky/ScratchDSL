@@ -11,33 +11,39 @@ fn recovery_preserves_valid_project_order_scopes_and_entry_scripts() {
     let overlays = BTreeMap::from([
         (
             main.clone(),
-            r#"@var score = 1
+            r#"score = 1
 import module
-@var score = 3
-@stage { 当绿旗被点击 { [等待 1 秒] } }
-@sprite "玩家" add {
-    @var hp = 9
-    @global @var shared = 4
-    定义自制积木 动作 @private {}
-    当绿旗被点击 { [移动 2 步] }
-}
+score = 3
+stage:
+    start:
+        等待 (1) 秒
+sprite "玩家" add:
+    hp = 9
+    global:shared = 4
+    def 动作 @private:
+        pass
+    start:
+        移动 (2) 步
 "#
             .into(),
         ),
         (
             module,
             r#"import main
-@var score = 2
-@var shared = 2
-@list logs = ["module"]
-定义自制积木 动作 @public {}
-当绿旗被点击 { [不存在的舞台脚本] }
-@sprite "玩家" {
-    @init {"x":5,"costumes":[{"name":"造型","path":"cat.svg"}]}
-    @var hp = 5
-    @list bag = [1]
-    当绿旗被点击 { [移动 1 步] }
-}
+score = 2
+shared = 2
+logs = {"module"}
+def 动作 @public:
+    pass
+start:
+    不存在的舞台脚本
+sprite "玩家":
+    init:
+        "x":5,"costumes":[{"name":"造型","path":"cat.svg"}]
+    hp = 5
+    bag = {1}
+    start:
+        移动 (1) 步
 "#
             .into(),
         ),
@@ -68,13 +74,10 @@ fn syntax_errors_in_multiple_modules_do_not_hide_later_imports() {
     let overlays = BTreeMap::from([
         (
             main.clone(),
-            "@unknown\nimport broken\n@other\nimport later\n@var final = 3\n".into(),
+            "@unknown\nimport broken\n@other\nimport later\nfinal = 3\n".into(),
         ),
-        (
-            broken.clone(),
-            "@bad\n@var recovered = 1\n@also_bad\n".into(),
-        ),
-        (later.clone(), "@var imported = 2\n".into()),
+        (broken.clone(), "@bad\nrecovered = 1\n@also_bad\n".into()),
+        (later.clone(), "imported = 2\n".into()),
     ]);
     let provider = OverlaySource::new(&overlays);
     let report = load_recovering(&main, directory.path(), &provider);
@@ -104,11 +107,11 @@ fn missing_modules_report_each_import_and_keep_remaining_declarations() {
     let overlays = BTreeMap::from([
         (
             main.clone(),
-            "import missing\nimport module\n@var main_value = 1\n".into(),
+            "import missing\nimport module\nmain_value = 1\n".into(),
         ),
         (
             module.clone(),
-            "import another_missing\n@var module_value = 2\n".into(),
+            "import another_missing\nmodule_value = 2\n".into(),
         ),
     ]);
     let provider = OverlaySource::new(&overlays);
@@ -135,26 +138,32 @@ fn missing_modules_report_each_import_and_keep_remaining_declarations() {
 fn bad_declarations_do_not_leak_private_contents_or_stop_siblings() {
     let directory = tempfile::tempdir().unwrap();
     let main = directory.path().join("main.sbdsl");
-    let source = r#"@sprite "玩家" {
-    @init {}
-    定义自制积木 动作 @one {}
-    定义自制积木 动作 @two {}
-    @var hp = 3
-}
-@sprite "玩家" {
-    @init {}
-    @var leaked = 1
-    @global @var leaked_global = 1
-    定义自制积木 不应存在 {}
-}
-@sprite "未创建" add {
-    @list leaked_list = []
-    定义自制积木 也不应存在 {}
-}
-定义自制积木 坏定义 @x @x {}
-定义自制积木 动作 @first {}
-定义自制积木 动作 @second {}
-@var final = 4
+    let source = r#"sprite "玩家":
+    init:
+        pass
+    def 动作 @one:
+        pass
+    def 动作 @two:
+        pass
+    hp = 3
+sprite "玩家":
+    init:
+        pass
+    leaked = 1
+    global:leaked_global = 1
+    def 不应存在:
+        pass
+sprite "未创建" add:
+    leaked_list = {}
+    def 也不应存在:
+        pass
+def 坏定义 @x @x:
+    pass
+def 动作 @first:
+    pass
+def 动作 @second:
+    pass
+final = 4
 "#;
     let provider = OverlaySource::new(&BTreeMap::from([(main.clone(), source.into())]));
     let report = load_recovering(&main, directory.path(), &provider);
@@ -180,13 +189,15 @@ fn bad_declarations_do_not_leak_private_contents_or_stop_siblings() {
 fn broken_init_keeps_role_scope_without_duplicate_init_errors() {
     let directory = tempfile::tempdir().unwrap();
     let main = directory.path().join("main.sbdsl");
-    let source = r#"@sprite "玩家" {
-    @init {"size":-1}
-    @var hp = 3
-    定义自制积木 私有动作 {}
-    当绿旗被点击 { [移动 1 步] }
-}
-@var final = 4
+    let source = r#"sprite "玩家":
+    init:
+        "size":-1
+    hp = 3
+    def 私有动作:
+        pass
+    start:
+        移动 (1) 步
+final = 4
 "#;
     let provider = OverlaySource::new(&BTreeMap::from([(main.clone(), source.into())]));
     let report = load_recovering(&main, directory.path(), &provider);
@@ -214,18 +225,15 @@ fn overlays_keep_nearby_import_precedence_fallback_and_cycle_identity() {
     let overlays = BTreeMap::from([
         (
             main.clone(),
-            "import parts.module\nimport parts.module\n@var shared = 4\n".into(),
+            "import parts.module\nimport parts.module\nshared = 4\n".into(),
         ),
         (
             module,
-            "import helper\nimport fallback\n@var shared = 3\n".into(),
+            "import helper\nimport fallback\nshared = 3\n".into(),
         ),
-        (
-            nearby,
-            "import module\n@var shared = 1\n@var nearby = 1\n".into(),
-        ),
-        (fallback, "@var shared = 2\n@var fallback = 2\n".into()),
-        (shadowed.clone(), "@var shadowed = 9\n".into()),
+        (nearby, "import module\nshared = 1\nnearby = 1\n".into()),
+        (fallback, "shared = 2\nfallback = 2\n".into()),
+        (shadowed.clone(), "shadowed = 9\n".into()),
     ]);
     let provider = OverlaySource::new(&overlays);
     let report = load_recovering(&main, &src_dir, &provider);
@@ -247,7 +255,7 @@ fn source_read_errors_keep_target_file_and_do_not_stop_siblings() {
     impl SourceProvider for FailingSource {
         fn read_to_string(&self, path: &Path) -> Result<String> {
             if self.identity(path) == self.main {
-                Ok("import broken\nimport broken\n@var recovered = 1\n".into())
+                Ok("import broken\nimport broken\nrecovered = 1\n".into())
             } else {
                 Err(Error::new("read failed"))
             }

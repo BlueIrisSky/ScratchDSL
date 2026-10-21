@@ -1,25 +1,34 @@
-@var score = 0
-@list logs = []
-定义自制积木 加分 数量: @n @warp { [将 $score 增加 @n] }
-定义自制积木 公共入口 { [加分 数量: 2] }
-定义自制积木 递归 次数: @n @warp {
-    如果 <@n > 0> 那么 {
-        [将 "tick" 加入 $list:logs]
-        [递归 次数: (@n - 1)]
-    }
-}
-定义自制积木 布尔测试 <@flag> {
-    如果 <@flag> 那么 { [将 $score 增加 1] }
-}
-@sprite "玩家" {
-    @init {}
-    @var score = 100
-    定义自制积木 加分 数量: @n { [将 $score 增加 @n] }
-    当绿旗被点击 {
-        [加分 数量: 3]
-        [公共入口]
-        [递归 次数: 3]
-        [布尔测试 <true>]
-        [布尔测试 <false>]
-    }
-}
+score = 0
+logs = {}
+resetlog = {"initial"}
+def 重置列表:
+    resetlog = {"global"}
+def 加分 数量: @n @warp:
+    score += @n
+def 公共入口:
+    加分 数量: (2)
+def 递归 次数: @n @warp:
+    if <@n > 0>:
+        将 ("tick") 加入 (logs)
+        递归 次数: (@n - 1)
+def 布尔测试 <@flag>:
+    if <@flag>:
+        score += 1
+sprite "玩家":
+    init:
+        pass
+    score = 100
+    resetlog = {"private"}
+    def 加分 数量: @n:
+        score += @n
+    start:
+        加分 数量: (3)
+        公共入口
+        递归 次数: (3)
+        布尔测试 <true>
+        布尔测试 <false>
+        resetlog = {"local"}
+        重置列表
+        fresh = {"one", 2}
+        fresh = {}
+        fresh = {"last"}

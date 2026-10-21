@@ -207,9 +207,18 @@ const STUB: &str = r#"
       object(block, 'block');
       if (block.blockType === 'label' || block.blockType === 'button') continue;
       const opcode = str(block.opcode, 'block.opcode');
-      const b = {opcode, blockType:str(block.blockType, opcode + '.blockType'), text:str(block.text, opcode + '.text'), arguments:Object.create(null)};
-      if (block.branchCount !== undefined && block.branchCount !== 0) throw new Error(opcode + ': branch substacks are unsupported');
-      if (block.branches !== undefined) throw new Error(opcode + ': branch substacks are unsupported');
+      const blockType = str(block.blockType, opcode + '.blockType');
+      const text = Array.isArray(block.text) ?
+        block.text.map((part, index) => str(part, opcode + '.text[' + index + ']')) :
+        str(block.text, opcode + '.text');
+      const b = {opcode, blockType, text, arguments:Object.create(null)};
+      const count = block.branchCount;
+      if (count !== undefined && (!Number.isSafeInteger(count) || count < 0))
+        throw new Error(opcode + '.branchCount must be a nonnegative safe integer');
+      b.branchCount = blockType === 'loop' || blockType === 'conditional' ? (count || 1) : (count || 0);
+      if (b.branchCount && !['loop', 'conditional', 'command'].includes(blockType))
+        throw new Error(opcode + ': branch substacks require command, loop, or conditional blockType');
+      if (block.branches !== undefined) throw new Error(opcode + ': use branchCount for substacks');
       if (optionalBool(block.isDynamic, opcode + '.isDynamic')) throw new Error(opcode + ': dynamic block mutations are unsupported');
       const targets = block.filter === undefined ? block.targetTypes : block.filter;
       if (targets !== undefined) {
@@ -290,8 +299,14 @@ fn build_templates(info: &Value, namespace: &str) -> Result<(Vec<Template>, BTre
         if !block_codes.insert(opcode.clone()) {
             return Err(Error::new(format!("重复的扩展 opcode: {local}")));
         }
+        let branch_count = block
+            .get("branchCount")
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or_else(|| Error::new(format!("{local}: branchCount 必须是非负整数")))?;
         let shape = match string(block, "blockType", local)? {
-            "command" => Shape::Command,
+            "command" if branch_count == 0 => Shape::Command,
+            "command" | "loop" | "conditional" => Shape::Control,
             "reporter" => Shape::Reporter,
             "Boolean" => Shape::Boolean,
             "hat" | "event" => Shape::Hat,
@@ -329,6 +344,18 @@ fn build_templates(info: &Value, namespace: &str) -> Result<(Vec<Template>, BTre
             .ok_or_else(|| Error::new(format!("{local}: arguments 必须是对象")))?;
         let mut slots = Vec::new();
         for (name, arg) in arguments {
+            let branch_name = name == "SUBSTACK"
+                || name
+                    .strip_prefix("SUBSTACK")
+                    .and_then(|index| index.parse::<usize>().ok())
+                    .is_some_and(|index| {
+                        index >= 2 && index <= branch_count && name == &format!("SUBSTACK{index}")
+                    });
+            if branch_count > 0 && branch_name {
+                return Err(Error::new(format!(
+                    "{local}.{name}: 参数名称与 C 型积木子堆栈输入冲突"
+                )));
+            }
             let kind = match string(arg, "type", &format!("{local}.{name}"))? {
                 "string" => ArgType::String,
                 "number" => ArgType::Number,
@@ -369,10 +396,26 @@ fn build_templates(info: &Value, namespace: &str) -> Result<(Vec<Template>, BTre
             }
             slots.push(slot);
         }
-        let text = string(block, "text", local)?;
+        let text = match &block["text"] {
+            Value::String(text) => text.clone(),
+            Value::Array(parts) => parts
+                .iter()
+                .map(|part| {
+                    part.as_str()
+                        .ok_or_else(|| Error::new(format!("{local}: text 数组只能包含字符串")))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join(" "),
+            _ => {
+                return Err(Error::new(format!(
+                    "{local}: text 必须是字符串或字符串数组"
+                )));
+            }
+        };
         let tokens =
-            tokens_from_text(text, &slots).map_err(|e| Error::new(format!("{local}: {}", e.0)))?;
+            tokens_from_text(&text, &slots).map_err(|e| Error::new(format!("{local}: {}", e.0)))?;
         templates.push(Template {
+            branch_count,
             opcode,
             shape,
             namespace: Some(namespace.into()),
@@ -488,10 +531,10 @@ mod tests {
         let mut r = Registry::new();
         load_extensions(&[path.clone().into(), path.into()], &mut r).unwrap();
         assert_eq!(r.extension_sources.len(), 1);
-        assert!(r.parse("[记录 3]", Shape::Command, &[]).is_err());
+        assert!(r.parse("记录 (3)", Shape::Command, &[]).is_err());
         let call = r
             .parse(
-                "\"自定义拓展\".[记录 \"自定义拓展\".(数量)]",
+                "\"自定义拓展\".记录 (\"自定义拓展\".数量)",
                 Shape::Command,
                 &[],
             )
@@ -499,30 +542,27 @@ mod tests {
         assert_eq!(call.template.opcode, "demo_say");
         assert!(matches!(&call.args[0], Expr::Call(v) if v.template.opcode == "demo_count"));
         let call = r
-            .parse("\"自定义拓展\".[选择 /'左'/]", Shape::Command, &[])
+            .parse("\"自定义拓展\".选择 '左'", Shape::Command, &[])
             .unwrap();
         assert_eq!(call.args, vec![Expr::Menu("left".into())]);
         assert_eq!(
             call.template.slots().next().unwrap().storage,
             Storage::Field
         );
-        assert!(
-            r.parse("\"自定义拓展\".[清空]", Shape::Command, &[])
-                .is_err()
-        );
+        assert!(r.parse("\"自定义拓展\".清空", Shape::Command, &[]).is_err());
         assert_eq!(
-            r.parse("\"自定义拓展\"::\"clearB\".[]", Shape::Command, &[])
+            r.parse("\"自定义拓展\"::\"clearB\"()", Shape::Command, &[])
                 .unwrap()
                 .template
                 .opcode,
             "demo_clearB"
         );
         assert!(
-            r.parse("\"自定义拓展\"::\"when\".hat(\"ok\")", Shape::Hat, &[])
+            r.parse("\"自定义拓展\"::\"when\"((\"ok\"))", Shape::Hat, &[])
                 .is_ok()
         );
         assert!(
-            r.parse("\"自定义拓展\"::\"say\".[1,]", Shape::Command, &[])
+            r.parse("\"自定义拓展\"::\"say\"((1),)", Shape::Command, &[])
                 .is_err()
         );
     }
@@ -545,29 +585,33 @@ mod tests {
         assert_eq!(registry.extension_sources["demo"], BASIC);
         for (text, shape, opcode) in [
             (
-                "自定义拓展.min-test.[记录 自定义拓展.min-test.(数量)]",
+                "自定义拓展.min-test.记录 (自定义拓展.min-test.数量)",
                 Shape::Command,
                 "demo_say",
             ),
-            ("自定义拓展.min-test.(数量)", Shape::Reporter, "demo_count"),
+            ("(自定义拓展.min-test.数量)", Shape::Reporter, "demo_count"),
             (
-                "自定义拓展.min-test.<已就绪 ?>",
+                "<自定义拓展.min-test.已就绪 ?>",
                 Shape::Boolean,
                 "demo_ready",
             ),
-            ("自定义拓展.min-test.完成 \"done\"", Shape::Hat, "demo_when"),
             (
-                "自定义拓展.min-test::\"when\".hat(\"done\")",
+                "自定义拓展.min-test.完成 (\"done\")",
                 Shape::Hat,
                 "demo_when",
             ),
             (
-                "自定义拓展.min-test::\"clearA\".[]",
+                "自定义拓展.min-test::\"when\"((\"done\"))",
+                Shape::Hat,
+                "demo_when",
+            ),
+            (
+                "自定义拓展.min-test::\"clearA\"()",
                 Shape::Command,
                 "demo_clearA",
             ),
             (
-                "\"自定义拓展.min-test\".[选择 /'左'/]",
+                "\"自定义拓展.min-test\".选择 '左'",
                 Shape::Command,
                 "demo_select",
             ),
@@ -577,7 +621,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{text}: {error}"));
             assert_eq!(call.template.opcode, opcode);
         }
-        for old in ["original-file.(数量)", "\"original-file\".(数量)", "(数量)"] {
+        for old in ["(original-file.数量)", "(\"original-file\".数量)", "(数量)"] {
             assert!(registry.parse(old, Shape::Reporter, &[]).is_err(), "{old}");
         }
     }
@@ -598,7 +642,7 @@ mod tests {
         assert_eq!(registry.extension_sources.len(), 2);
         assert_eq!(
             registry
-                .parse("left.(数量)", Shape::Reporter, &[])
+                .parse("(left.数量)", Shape::Reporter, &[])
                 .unwrap()
                 .template
                 .opcode,
@@ -606,7 +650,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .parse("right.(数量)", Shape::Reporter, &[])
+                .parse("(right.数量)", Shape::Reporter, &[])
                 .unwrap()
                 .template
                 .opcode,
@@ -740,7 +784,7 @@ mod tests {
         let mut r = Registry::new();
         load_extensions(&[path.into()], &mut r).unwrap();
         let call = r
-            .parse("dynamic.[选 /'anything'/]", Shape::Command, &[])
+            .parse("dynamic.选 ('anything')", Shape::Command, &[])
             .unwrap();
         assert!(
             call.template
@@ -761,7 +805,7 @@ mod tests {
         let path = Path::new("invalid.js");
         for info in [
             "{id:'x',blocks:[{opcode:'x',blockType:'command',text:()=> 'x'}]}",
-            "{id:'x',blocks:[{opcode:'x',blockType:'command',text:['x']}]}",
+            "{id:'x',blocks:[{opcode:'x',blockType:'command',text:['x', 1]}]}",
             "{id:'x',blocks:[{opcode:'x',blockType:'command',text:'[A]',arguments:{A:{type:'string',defaultValue:()=> 'x'}}}]}",
             "{id:'x',blocks:[],menus:{m:{items:()=> ['x']}}}",
             "{id:'x',blocks:[],customFieldTypes:{special:{implementation(){}}}}",
@@ -769,6 +813,120 @@ mod tests {
         ] {
             let source = format!("Scratch.extensions.register({{getInfo(){{return {info}}}}});");
             assert!(extract_info(&source, path).is_err(), "{info}");
+        }
+    }
+
+    #[test]
+    fn control_blocks_flatten_all_text_arms_and_preserve_slot_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_extension(
+            dir.path(),
+            "control.js",
+            r#"Scratch.extensions.register({getInfo(){return {id:'flow',blocks:[
+                {opcode:'multi',blockType:'conditional',branchCount:3,
+                 text:['若 [A]','否则 [B]','再次 [C]','尾部 [D]','结束 [E]'],
+                 arguments:{E:{type:'number'},C:{type:'string'},A:{type:'Boolean'},
+                    D:{type:'string',menu:'side'},B:{type:'number'}}},
+                {opcode:'loop',blockType:'loop',text:'循环 [N]',arguments:{N:{type:'number'}}},
+                {opcode:'zero',blockType:'conditional',branchCount:0,text:'默认分支'},
+                {opcode:'command',blockType:'command',branchCount:5,text:'多个分支'},
+                {opcode:'ordinary',blockType:'command',text:['前 [A]','后 [B]'],
+                 arguments:{B:{type:'number'},A:{type:'number'}}},
+                {opcode:'empty',blockType:'conditional',branchCount:2,text:[]}
+            ],menus:{side:['left','right']}}}});"#,
+        );
+        let mut registry = Registry::new();
+        load_extensions(&[path.into()], &mut registry).unwrap();
+        for source in [
+            r#"control.若 <true> 否则 (2) 再次 ("c") 尾部 'left' 结束 (5)"#,
+            r#"control::"multi"(<true>, (2), ("c"), 'left', (5))"#,
+        ] {
+            let call = registry.parse(source, Shape::Control, &[]).unwrap();
+            assert_eq!(call.template.opcode, "flow_multi");
+            assert_eq!(call.template.branch_count, 3);
+            assert_eq!(
+                call.template
+                    .slots()
+                    .map(|slot| slot.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["A", "B", "C", "D", "E"]
+            );
+            assert_eq!(
+                call.args,
+                [
+                    Expr::Bool(true),
+                    Expr::Number(2.),
+                    Expr::String("c".into()),
+                    Expr::Menu("left".into()),
+                    Expr::Number(5.),
+                ]
+            );
+            assert!(registry.parse(source, Shape::Command, &[]).is_err());
+        }
+        for (source, branches) in [
+            ("control.循环 (2)", 1),
+            ("control.默认分支", 1),
+            ("control.多个分支", 5),
+            ("control::\"empty\"()", 2),
+        ] {
+            assert_eq!(
+                registry
+                    .parse(source, Shape::Control, &[])
+                    .unwrap()
+                    .template
+                    .branch_count,
+                branches
+            );
+        }
+        let ordinary = registry
+            .parse("control.前 (1) 后 (2)", Shape::Command, &[])
+            .unwrap();
+        assert_eq!(ordinary.template.branch_count, 0);
+        assert_eq!(ordinary.args, [Expr::Number(1.), Expr::Number(2.)]);
+        for source in [
+            "control.循环 2",
+            r#"control::"multi"(<true>, (2))"#,
+            "control.前 (1) 后 (2)",
+        ] {
+            assert!(
+                registry.parse(source, Shape::Control, &[]).is_err(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn controls_validate_branch_counts_and_substack_name_collisions() {
+        let path = Path::new("invalid.js");
+        for count in [
+            "-1",
+            "1.5",
+            "'2'",
+            "null",
+            "true",
+            "NaN",
+            "Infinity",
+            "9007199254740992",
+        ] {
+            let source = format!(
+                "Scratch.extensions.register({{getInfo(){{return {{id:'x',blocks:[{{opcode:'c',blockType:'loop',text:'x',branchCount:{count}}}]}}}}}});"
+            );
+            assert!(extract_info(&source, path).is_err(), "{count}");
+        }
+        for kind in ["reporter", "Boolean", "hat", "event"] {
+            let source = format!(
+                "Scratch.extensions.register({{getInfo(){{return {{id:'x',blocks:[{{opcode:'c',blockType:'{kind}',text:'x',branchCount:1}}]}}}}}});"
+            );
+            assert!(extract_info(&source, path).is_err(), "{kind}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["SUBSTACK", "SUBSTACK2", "SUBSTACK3", "SUBSTACK4"] {
+            let source = format!(
+                "Scratch.extensions.register({{getInfo(){{return {{id:'x',blocks:[{{opcode:'c',blockType:'conditional',branchCount:3,text:'[{name}]',arguments:{{{name}:{{type:'number'}}}}}}]}}}}}});"
+            );
+            let path = write_extension(dir.path(), "collision.js", &source);
+            let result = load_extensions(&[path.into()], &mut Registry::new());
+            assert_eq!(result.is_ok(), name == "SUBSTACK4", "{name}: {result:?}");
         }
     }
 

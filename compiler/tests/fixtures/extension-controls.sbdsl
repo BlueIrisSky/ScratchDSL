@@ -1,0 +1,33 @@
+loops = 0
+second = 0
+third = 0
+after = 0
+log = {}
+
+def 记录:
+    将 ("third") 加入 (log)
+
+sprite "玩家":
+    init:
+        pass
+    start:
+        flow.执行 (3) 次:
+            loops += 1
+        flow.如果 <loops = 3> 否则 (7):
+            second = 1
+        else:
+            second = -1
+        flow::"choose"(<false>, (9)):
+            second += 100
+        else:
+            second += 2
+        flow::"pick"((3), ("B"), (42), ("tail")):
+            third = -1
+        else:
+            third = -2
+        else:
+            记录
+            third += 42
+        flow.单次 (5):
+            after = 5
+        after += 1

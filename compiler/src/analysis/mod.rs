@@ -176,8 +176,7 @@ fn analyze_project(
     // Untrusted workspaces still get built-in semantics and import validation.
     // Skip binding only when configured extensions were intentionally not loaded;
     // otherwise their missing schema would create misleading follow-on errors.
-    let extensions_unavailable = !allow_extensions && !config.extensions.is_empty();
-    let can_bind = if !extensions_unavailable {
+    let can_bind = if allow_extensions || config.extensions.is_empty() {
         match cache.registry(&config.extensions) {
             Ok(registry) => {
                 result.registry = registry;
@@ -213,14 +212,10 @@ fn add_error(
     let span = error.span();
     let path = provider.identity(span.map_or(fallback, |s| Path::new(&s.file)));
     let source = provider.read_to_string(&path).unwrap_or_default();
-    let mut start = span.map_or(0, |s| s.start).min(source.len());
-    while !source.is_char_boundary(start) {
-        start -= 1;
-    }
-    let mut end = span.map_or(start, |s| s.end).max(start).min(source.len());
-    while !source.is_char_boundary(end) {
-        end -= 1;
-    }
+    let start = source.floor_char_boundary(span.map_or(0, |s| s.start));
+    let mut end = source
+        .floor_char_boundary(span.map_or(start, |s| s.end))
+        .max(start);
     if end == start {
         end += source[start..].chars().next().map_or(0, char::len_utf8);
     }

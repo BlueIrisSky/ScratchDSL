@@ -2,7 +2,10 @@
 //!
 //! This scanner only determines safe insertion contexts. The registry remains the
 //! authority for block text, argument defaults, namespaces, and target support.
-use super::symbols::{VisibleSymbols, menu_end};
+use super::{
+    symbols::{VisibleSymbols, menu_end, quoted_end},
+    text::{byte_offset, position as position_at},
+};
 use crate::model::{ArgType, Shape, Slot, Template, Token};
 use crate::registry::Registry;
 use lsp_types::{
@@ -28,7 +31,7 @@ pub fn complete_with_symbols(
     let Some(cursor) = byte_offset(source, position) else {
         return Vec::new();
     };
-    match context(source, cursor) {
+    match context(source, cursor, registry, symbols) {
         Context::Blocked => Vec::new(),
         Context::Init { start } => {
             data_completions(source, start + 1, cursor, DataSchema::Init, false)
@@ -41,18 +44,43 @@ pub fn complete_with_symbols(
             namespace,
             target,
             script,
+            expected,
+            identity,
         } => {
             let prefix = normalize(&source[content..cursor]);
             // Once a value has been entered, replacing an entire invocation is
             // surprising. Only complete its initial fixed words in this version.
-            let mut result = Vec::new();
+            let assignment_target = shape.is_none() && namespace.is_none();
+            let mut result = if namespace.is_none()
+                && (assignment_target || matches!(shape, Some(Shape::Reporter | Shape::Boolean)))
+            {
+                reference_at(source, content, cursor, None, &[])
+                    .map(|mut reference| {
+                        reference.assignment_target = assignment_target;
+                        reference.expected = expected;
+                        reference_completions(source, cursor, &reference, symbols)
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if assignment_target {
+                result.extend(assignment_operator_completions(
+                    source, content, cursor, symbols,
+                ));
+            }
+            if identity || !at_block_boundary(source, cursor) {
+                return result;
+            }
+            let existing_suite = source[cursor..].trim_start().starts_with(':');
             let mut seen = BTreeSet::new();
             for template in registry.templates.iter().chain(symbols.procedures.iter()) {
-                if shape.is_some_and(|s| s != template.shape)
+                if shape.is_some_and(|shape| template.shape != shape)
                     || (shape.is_none()
                         && !match template.shape {
                             Shape::Hat => script != Some(true),
                             Shape::Control => script != Some(false),
+                            Shape::Command => script == Some(true) || target.is_none(),
                             _ => false,
                         })
                     || namespace
@@ -70,21 +98,46 @@ pub fn complete_with_symbols(
                 if !initial.starts_with(&prefix) {
                     continue;
                 }
-                let Some(end) = replacement_end(source, cursor, template.shape) else {
-                    continue;
-                };
                 let Some((label, mut snippet)) =
                     completion_text_visible(template, registry, &symbols.procedures)
                 else {
                     continue;
                 };
+                if existing_suite && !matches!(template.shape, Shape::Control | Shape::Hat) {
+                    continue;
+                }
+                // Extension metadata is untrusted and may describe a huge
+                // branch count. Avoid allocating an unbounded snippet.
+                if extension_control(template) && template.branch_count > 256 && !existing_suite {
+                    continue;
+                }
                 if !seen.insert(label.clone()) {
                     continue;
                 }
+                if shape == Some(Shape::Boolean) {
+                    snippet = snippet
+                        .strip_prefix('<')
+                        .and_then(|text| text.strip_suffix('>'))
+                        .unwrap_or(&snippet)
+                        .to_owned();
+                }
                 if matches!(template.shape, Shape::Hat | Shape::Control) {
-                    if !source[cursor..].trim_start().starts_with('{') {
+                    if !existing_suite {
                         let indent = indentation(source, start);
-                        snippet.push_str(&format!(" {{\n{indent}    $0\n{indent}\\}}"));
+                        if extension_control(template) {
+                            for branch in 0..template.branch_count.max(1) {
+                                if branch > 0 {
+                                    snippet.push_str(&format!("\n{indent}else"));
+                                }
+                                snippet.push_str(&format!(
+                                    ":\n{indent}    ${{{}:pass}}",
+                                    template.slots().count() + branch + 1
+                                ));
+                            }
+                            snippet.push_str("$0");
+                        } else {
+                            snippet.push_str(&format!(":\n{indent}    $0"));
+                        }
                     }
                 } else {
                     snippet.push_str("$0");
@@ -92,7 +145,7 @@ pub fn complete_with_symbols(
                 let mut candidate = item(
                     source,
                     start,
-                    end,
+                    cursor,
                     label,
                     snippet,
                     CompletionItemKind::SNIPPET,
@@ -106,6 +159,27 @@ pub fn complete_with_symbols(
                 // an explicit opcode to disambiguate third-party templates.
                 candidate.filter_text = Some(block_text(template).0);
                 result.push(candidate);
+            }
+            if shape.is_none()
+                && namespace.is_none()
+                && script == Some(true)
+                && "else".starts_with(&prefix)
+            {
+                let indent = indentation(source, start);
+                let snippet = if source[cursor..].trim_start().starts_with(':') {
+                    "else".into()
+                } else {
+                    format!("else:\n{indent}    $0")
+                };
+                result.push(item(
+                    source,
+                    start,
+                    cursor,
+                    "else".into(),
+                    snippet,
+                    CompletionItemKind::KEYWORD,
+                    "条件分支".into(),
+                ));
             }
             result
         }
@@ -132,38 +206,6 @@ fn item(
         })),
         ..CompletionItem::default()
     }
-}
-
-pub(crate) fn byte_offset(source: &str, position: Position) -> Option<usize> {
-    let mut start = 0;
-    for _ in 0..position.line {
-        start += source[start..].find('\n')? + 1;
-    }
-    let line = source[start..].split('\n').next()?.trim_end_matches('\r');
-    let mut units = 0;
-    for (offset, c) in line.char_indices() {
-        if units == position.character {
-            return Some(start + offset);
-        }
-        units += c.len_utf16() as u32;
-        if units > position.character {
-            return None;
-        }
-    }
-    (units == position.character).then_some(start + line.len())
-}
-
-fn position_at(source: &str, byte: usize) -> Position {
-    let prefix = &source[..byte];
-    Position::new(
-        prefix.bytes().filter(|&b| b == b'\n').count() as u32,
-        prefix
-            .rsplit('\n')
-            .next()
-            .unwrap_or("")
-            .encode_utf16()
-            .count() as u32,
-    )
 }
 
 fn normalize(text: &str) -> String {
@@ -227,28 +269,16 @@ fn slot_default(slot: &Slot) -> String {
             Some(false) => "<false>".into(),
             None => "<>".into(),
         },
-        ArgType::Variable | ArgType::List => {
-            let name = slot.default.as_str().filter(|s| !s.is_empty()).unwrap_or(
-                if slot.arg_type == ArgType::List {
-                    "列表"
-                } else {
-                    "变量"
-                },
-            );
-            let name = if crate::parser::parse_name(name).is_ok() {
-                name.to_owned()
+        ArgType::Variable | ArgType::List => slot
+            .default
+            .as_str()
+            .filter(|name| crate::parser::is_data_name(name))
+            .unwrap_or(if slot.arg_type == ArgType::List {
+                "列表"
             } else {
-                quote(name)
-            };
-            format!(
-                "${}{name}",
-                if slot.arg_type == ArgType::List {
-                    "list:"
-                } else {
-                    ""
-                }
-            )
-        }
+                "变量"
+            })
+            .to_owned(),
         ArgType::Color => quote(slot.default.as_str().unwrap_or("#000000")),
         _ => match &slot.default {
             serde_json::Value::Number(n) => n.to_string(),
@@ -259,38 +289,70 @@ fn slot_default(slot: &Slot) -> String {
     }
 }
 
+fn assignment_template(template: &Template) -> bool {
+    template.namespace.is_none()
+        && template.procedure.is_none()
+        && matches!(
+            template.opcode.as_str(),
+            "data_setvariableto" | "data_changevariableby"
+        )
+}
+
+fn extension_control(template: &Template) -> bool {
+    template.shape == Shape::Control && template.namespace.is_some()
+}
+
 fn block_text(template: &Template) -> (String, String) {
     let prefix = template
         .namespace
         .as_ref()
         .map(|ns| format!("{}.", namespace_text(ns)))
         .unwrap_or_default();
-    let (open, close) = match template.shape {
-        Shape::Command => ("[", "]"),
-        Shape::Reporter => ("(", ")"),
-        Shape::Boolean => ("<", ">"),
-        _ => ("", ""),
+    let mut label = if template.shape == Shape::Boolean {
+        format!("<{prefix}")
+    } else {
+        prefix
     };
-    let mut label = format!("{prefix}{open}");
     let mut snippet = escape_snippet(&label);
     let mut index = 1;
     for token in &template.tokens {
         match token {
             Token::Literal(text) => {
+                let text = if sugar_template(template) {
+                    text.as_str()
+                } else {
+                    text.trim()
+                };
                 label.push_str(text);
                 snippet.push_str(&escape_snippet(text));
             }
             Token::Slot(slot) => {
-                let default = slot_default(slot);
+                let default = template_slot_default(template, slot);
                 label.push_str(&default);
                 snippet.push_str(&format!("${{{index}:{}}}", escape_snippet(&default)));
                 index += 1;
             }
         }
     }
-    label.push_str(close);
-    snippet.push_str(close);
+    if template.shape == Shape::Boolean {
+        label.push('>');
+        snippet.push('>');
+    }
     (label, snippet)
+}
+
+fn sugar_template(template: &Template) -> bool {
+    assignment_template(template)
+        || (template.namespace.is_none() && template.shape == Shape::Control)
+}
+
+fn template_slot_default(template: &Template, slot: &Slot) -> String {
+    let value = slot_default(slot);
+    if sugar_template(template) || !crate::registry::slot_requires_parentheses(slot) {
+        value
+    } else {
+        format!("({value})")
+    }
 }
 
 fn procedure_label(template: &Template) -> String {
@@ -321,19 +383,27 @@ enum ReferenceKind {
     Parameter,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DataKind {
+    Scalar,
+    List,
+    Either,
+}
+
 struct Reference {
     start: usize,
     end: usize,
     name: usize,
     kind: ReferenceKind,
     global: bool,
-    list: bool,
+    expected: DataKind,
     quoted: bool,
     boolean: bool,
+    assignment_target: bool,
 }
 
-/// A reference is scanned separately from ordinary strings so that `$"a b"`
-/// can be completed without enabling suggestions in a block's text argument.
+/// Quoted parameter names are distinct from string arguments; data names only
+/// use ordinary identifiers, optionally qualified with `global:`.
 fn reference_at(
     source: &str,
     start: usize,
@@ -341,53 +411,41 @@ fn reference_at(
     boolean_open: Option<usize>,
     expressions: &[Expression],
 ) -> Option<Reference> {
-    let kind = if source[start..].starts_with('$') {
-        ReferenceKind::Data
-    } else {
+    let kind = if source[start..].starts_with('@') {
         ReferenceKind::Parameter
+    } else {
+        ReferenceKind::Data
     };
-    let mut name = start + 1;
+    let mut name = start + usize::from(kind == ReferenceKind::Parameter);
     let mut global = false;
-    let mut list = false;
-    if kind == ReferenceKind::Data {
-        if source[name..cursor].starts_with("global:") {
-            global = true;
-            name += "global:".len();
-        }
-        if source[name..cursor].starts_with("list:") {
-            list = true;
-            name += "list:".len();
-        }
+    if kind == ReferenceKind::Data && source[name..cursor].starts_with("global:") {
+        global = true;
+        name += "global:".len();
     }
     let quoted = source[name..].starts_with('"');
-    if quoted && source[name..cursor].contains(['\n', '\r']) {
+    if (quoted && source[name..cursor].contains(['\n', '\r']))
+        || (kind == ReferenceKind::Data && quoted)
+        || source[name..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit() || c == '$')
+    {
         return None;
     }
     let end = if quoted {
-        let mut escaped = false;
-        let mut close = None;
-        for (offset, c) in source[name + 1..].char_indices() {
-            if matches!(c, '\n' | '\r') {
-                break;
-            }
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                close = Some(name + 1 + offset + 1);
-                break;
-            }
-        }
+        let candidate = quoted_end(source, name);
+        let close =
+            (candidate > name + 1 && source[name..candidate].ends_with('"')).then_some(candidate);
         if let Some(end) = close.filter(|&end| {
             let next = source[end..].chars().next();
-            let boundary = next.is_none_or(|c| c.is_whitespace() || "]>)},#<+-=*/".contains(c));
+            let boundary = next.is_none_or(|c| c.is_whitespace() || "]>)},#<+-=*/%".contains(c));
             // Delimited values need no separating space. Ask the lexer about
             // the next atom, including quoted/qualified values and numbers.
             // A quote after trailing whitespace followed by bare text is more
             // likely the opening quote of the next argument in unfinished code.
             boundary
-                || crate::parser::scan_atom(source, end).is_ok()
+                || (next.is_none_or(|c| !(c.is_alphabetic() || c == '_'))
+                    && crate::parser::scan_atom(source, end).is_ok())
                 || !source[name + 1..end - 1].ends_with(char::is_whitespace)
         }) {
             end
@@ -418,9 +476,10 @@ fn reference_at(
         name,
         kind,
         global,
-        list,
+        expected: DataKind::Scalar,
         quoted,
         boolean,
+        assignment_target: false,
     })
 }
 
@@ -430,6 +489,9 @@ fn reference_completions(
     reference: &Reference,
     symbols: &VisibleSymbols,
 ) -> Vec<CompletionItem> {
+    if reference.assignment_target && reference.kind == ReferenceKind::Parameter {
+        return Vec::new();
+    }
     let partial = &source[reference.name..cursor];
     let partial = if reference.quoted {
         let text = partial.strip_prefix('"').unwrap_or("");
@@ -444,6 +506,9 @@ fn reference_completions(
     };
     let mut result = Vec::new();
     if reference.kind == ReferenceKind::Parameter {
+        if reference.expected == DataKind::List {
+            return result;
+        }
         for slot in &symbols.parameters {
             let boolean = slot.arg_type == ArgType::Boolean;
             if !slot.name.starts_with(&partial) || (reference.boolean && !boolean) {
@@ -487,84 +552,94 @@ fn reference_completions(
     }
 
     let entered_prefix = &source[reference.start..reference.name];
-    for (is_list, symbols) in [(false, &symbols.variables), (true, &symbols.lists)] {
-        if (reference.list && !is_list) || (reference.global && !reference.list && is_list) {
-            continue;
-        }
-        let mut visible = BTreeMap::new();
-        for symbol in symbols {
+    let mut visible = BTreeMap::new();
+    for (is_list, values) in [(false, &symbols.variables), (true, &symbols.lists)] {
+        for symbol in values {
             if (reference.global && !symbol.global) || !symbol.name.starts_with(&partial) {
                 continue;
             }
-            let existing = visible.get(&symbol.name);
-            if existing.is_none_or(|previous: &&super::symbols::DataSymbol| {
-                previous.global && !symbol.global
-            }) {
-                visible.insert(&symbol.name, symbol);
+            if let Some((_, previous)) = visible.get(&symbol.name) {
+                let previous: &&super::symbols::DataSymbol = previous;
+                if !previous.global || symbol.global {
+                    continue;
+                }
             }
-        }
-        for symbol in visible.into_values() {
-            let name = name_text(&symbol.name, reference.quoted);
-            let label = format!(
-                "${}{}{name}",
-                if reference.global { "global:" } else { "" },
-                if is_list { "list:" } else { "" },
-            );
-            let mut candidate = item(
-                source,
-                reference.start,
-                reference.end,
-                label.clone(),
-                escape_snippet(&label),
-                if is_list {
-                    CompletionItemKind::FIELD
-                } else {
-                    CompletionItemKind::VARIABLE
-                },
-                format!(
-                    "{}{}",
-                    if symbol.global { "全局" } else { "角色" },
-                    if is_list { "列表" } else { "变量" },
-                ),
-            );
-            candidate.filter_text = Some(format!("{entered_prefix}{name}"));
-            result.push(candidate);
+            visible.insert(&symbol.name, (is_list, symbol));
         }
     }
-    if !reference.list && !reference.quoted {
-        for (prefix, detail) in [("list:", "列表引用"), ("global:", "全局数据引用")] {
-            if (prefix == "global:" && reference.global) || !prefix.starts_with(&partial) {
-                continue;
-            }
-            let label = format!("{entered_prefix}{prefix}");
-            let end = reference.end + usize::from(source[reference.end..].starts_with(':'));
-            let mut candidate = item(
-                source,
-                reference.start,
-                end,
-                label.clone(),
-                escape_snippet(&label),
-                CompletionItemKind::KEYWORD,
-                detail.into(),
-            );
-            candidate.command = Some(lsp_types::Command {
-                title: "补全数据名称".into(),
-                command: "editor.action.triggerSuggest".into(),
-                arguments: None,
-            });
-            result.push(candidate);
+    for (name, (is_list, symbol)) in visible {
+        if (is_list && reference.expected == DataKind::Scalar)
+            || (!is_list && reference.expected == DataKind::List)
+        {
+            continue;
         }
+        let label = format!("{}{name}", if reference.global { "global:" } else { "" });
+        let mut candidate = item(
+            source,
+            reference.start,
+            reference.end,
+            label.clone(),
+            escape_snippet(&label),
+            if is_list {
+                CompletionItemKind::FIELD
+            } else {
+                CompletionItemKind::VARIABLE
+            },
+            format!(
+                "{}{}",
+                if symbol.global { "全局" } else { "角色" },
+                if is_list { "列表" } else { "变量" }
+            ),
+        );
+        candidate.filter_text = Some(format!("{entered_prefix}{name}"));
+        result.push(candidate);
+    }
+    if !reference.global && "global:".starts_with(&partial) {
+        let end = reference.end + usize::from(source[reference.end..].starts_with(':'));
+        let mut candidate = item(
+            source,
+            reference.start,
+            end,
+            "global:".into(),
+            "global:".into(),
+            CompletionItemKind::KEYWORD,
+            "全局数据引用".into(),
+        );
+        candidate.command = Some(lsp_types::Command {
+            title: "补全数据名称".into(),
+            command: "editor.action.triggerSuggest".into(),
+            arguments: None,
+        });
+        result.push(candidate);
     }
     result
 }
 
-/// A valid schema can still have display text ambiguous with another template.
-/// Never offer a default snippet that invokes a different block or fails to
-/// parse. Extensions have the language's explicit-opcode escape hatch; builtin
-/// ambiguities are omitted because inventing a builtin namespace changes DSL.
-#[cfg(test)]
-fn completion_text(template: &Template, registry: &Registry) -> Option<(String, String)> {
-    completion_text_visible(template, registry, &[])
+fn template_default_types(template: &Template) -> BTreeMap<(String, bool), bool> {
+    template
+        .slots()
+        .filter_map(|slot| {
+            matches!(slot.arg_type, ArgType::Variable | ArgType::List)
+                .then(|| crate::parser::parse_reference(&slot_default(slot)).ok())
+                .flatten()
+                .map(|(name, global)| ((name, global), slot.arg_type == ArgType::List))
+        })
+        .collect()
+}
+
+fn symbol_data_types(symbols: &VisibleSymbols) -> BTreeMap<(String, bool), bool> {
+    let mut types = BTreeMap::new();
+    for global in [true, false] {
+        for (list, values) in [(false, &symbols.variables), (true, &symbols.lists)] {
+            for symbol in values.iter().filter(|symbol| symbol.global == global) {
+                types.insert((symbol.name.clone(), false), list);
+                if global {
+                    types.insert((symbol.name.clone(), true), list);
+                }
+            }
+        }
+    }
+    types
 }
 
 fn completion_text_visible(
@@ -572,9 +647,10 @@ fn completion_text_visible(
     registry: &Registry,
     visible: &[Template],
 ) -> Option<(String, String)> {
+    let data_types = template_default_types(template);
     let resolves_to_template = |text: &str| {
         registry
-            .parse(text, template.shape, visible)
+            .parse_typed(text, template.shape, visible, &data_types)
             .is_ok_and(|call| {
                 call.template.opcode == template.opcode
                     && call.template.namespace == template.namespace
@@ -587,48 +663,39 @@ fn completion_text_visible(
     }
     let namespace = template.namespace.as_ref()?;
     let opcode = template.local_opcode.as_ref()?;
-    let (open, close) = match template.shape {
-        Shape::Command => ("[", "]"),
-        Shape::Reporter => ("(", ")"),
-        Shape::Boolean => ("<", ">"),
-        Shape::Hat => ("hat(", ")"),
-        Shape::Control => return None,
-    };
-    let mut label = format!("{}::{}.{open}", namespace_text(namespace), quote(opcode));
+    let mut label = format!(
+        "{}{}::{}(",
+        if template.shape == Shape::Boolean {
+            "<"
+        } else {
+            ""
+        },
+        namespace_text(namespace),
+        quote(opcode)
+    );
     let mut snippet = escape_snippet(&label);
     for (index, slot) in template.slots().enumerate() {
         if index > 0 {
             label.push_str(", ");
             snippet.push_str(", ");
         }
-        let default = slot_default(slot);
+        let default = template_slot_default(template, slot);
         label.push_str(&default);
         snippet.push_str(&format!("${{{}:{}}}", index + 1, escape_snippet(&default)));
     }
-    label.push_str(close);
-    snippet.push_str(close);
+    label.push(')');
+    snippet.push(')');
+    if template.shape == Shape::Boolean {
+        label.push('>');
+        snippet.push('>');
+    }
     resolves_to_template(&label).then_some((label, snippet))
 }
 
-fn replacement_end(source: &str, cursor: usize, shape: Shape) -> Option<usize> {
+fn at_block_boundary(source: &str, cursor: usize) -> bool {
     let rest = &source[cursor..];
     let trimmed = rest.trim_start_matches([' ', '\t']);
-    let close = match shape {
-        Shape::Command => ']',
-        Shape::Reporter => ')',
-        Shape::Boolean => '>',
-        _ => {
-            return (trimmed.is_empty() || trimmed.starts_with(['{', '}', '\n', '\r']))
-                .then_some(cursor);
-        }
-    };
-    if trimmed.starts_with(close) {
-        Some(cursor + rest.len() - trimmed.len() + 1)
-    } else if trimmed.is_empty() || trimmed.starts_with(['\n', '\r', '}', ']', ')', '>']) {
-        Some(cursor)
-    } else {
-        None
-    }
+    trimmed.is_empty() || trimmed.starts_with([':', '\n', '\r', ')', '>'])
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -650,66 +717,32 @@ enum Context {
         namespace: Option<String>,
         target: Option<Target>,
         script: Option<bool>,
+        expected: DataKind,
+        identity: bool,
     },
 }
 
 struct Expression {
     open: char,
-    start: usize,
     content: usize,
     namespace: Option<String>,
-    explicit: bool,
-}
-
-/// Returns the end of a string, or EOF for an unfinished string. Escapes are
-/// skipped here, not validated: JSON and ordinary DSL strings differ.
-fn string_end(source: &str, start: usize) -> usize {
-    let mut escaped = false;
-    for (offset, c) in source[start + 1..].char_indices() {
-        if escaped {
-            escaped = false;
-        } else if c == '\\' {
-            escaped = true;
-        } else if c == '"' {
-            return start + 1 + offset + 1;
-        }
-    }
-    source.len()
+    opcode: Option<String>,
+    slot: Option<ArgType>,
 }
 
 fn comment_end(source: &str, start: usize) -> usize {
-    let line_end = source[start..]
-        .find('\n')
-        .map_or(source.len(), |p| start + p);
-    if let Some(end) = source[start + 1..line_end].find('#') {
-        return start + 1 + end + 1;
-    }
-    let line_start = source[..start].rfind('\n').map_or(0, |p| p + 1);
-    if source[line_start..start].trim().is_empty() && source[start + 1..line_end].trim().is_empty()
-    {
-        source[line_end..]
-            .find('#')
-            .map_or(source.len(), |p| line_end + p + 1)
-    } else {
-        line_end
-    }
+    crate::notation::comment_end(source, start).unwrap_or(source.len())
 }
 
-/// Find a directly adjacent namespace. In particular, a quoted namespace is
-/// one atom, even when its filename contains spaces or punctuation.
-fn namespace_before(source: &str, open: usize) -> Option<(usize, String)> {
-    let text = source[..open].strip_suffix('.')?;
-    namespace_name_before(text)
-}
-
-fn namespace_name_before(text: &str) -> Option<(usize, String)> {
+/// A quoted namespace is one atom, even when its filename contains spaces.
+fn namespace_name_before(text: &str) -> Option<String> {
     if text.ends_with('"') {
         for (start, c) in text.char_indices().rev() {
             if c == '"'
                 && !text[..start].ends_with(':')
                 && let Ok(name) = crate::parser::parse_string(&text[start..])
             {
-                return Some((start, name));
+                return Some(name);
             }
         }
     } else {
@@ -718,70 +751,102 @@ fn namespace_name_before(text: &str) -> Option<(usize, String)> {
             .rev()
             .find(|(_, c)| !crate::parser::namespace_continue(*c))
             .map_or(0, |(p, c)| p + c.len_utf8());
-        // References use a narrower name grammar than namespaces. In
-        // `$score-ext.(数字)` the minus follows the variable, even if an
-        // extension named `score-ext` also exists. Let the parser locate the
-        // complete reference, including `$global:list:` prefixes.
-        if text[..start].ends_with(['$', '@', ':'])
-            && let Some(reference) = text[..start].rfind(['$', '@'])
+        // `global:score-ext::"read"()` has a reference before the minus.
+        // Bare `score-ext::"read"()` instead uses a hyphenated namespace.
+        if text[..start].ends_with(['@', ':'])
+            && let Some(reference) = text[..start]
+                .char_indices()
+                .rev()
+                .find(|(_, c)| !(c.is_alphanumeric() || "_:@".contains(*c)))
+                .map(|(offset, c)| offset + c.len_utf8())
+                .or(Some(0))
             && let Ok(end) = crate::parser::scan_atom(text, reference)
             && end >= start
             && let Some(namespace) = text[end..].strip_prefix('-')
             && crate::parser::is_bare_namespace(namespace)
         {
-            return Some((end + 1, namespace.into()));
+            return Some(namespace.into());
         }
         let name = &text[start..];
         if crate::parser::is_bare_namespace(name) {
-            return Some((start, name.into()));
+            return Some(name.into());
         }
         // A numeric left operand can directly precede a minus, as in
-        // `(1-ext.(数字))`. Preserve it when replacing the namespace call.
+        // `(1-ext::"read"())`. Preserve it when replacing the namespace call.
         for (offset, c) in name.char_indices() {
             if c == '-' && crate::parser::is_bare_namespace(&name[offset + 1..]) {
-                return Some((start + offset + 1, name[offset + 1..].into()));
+                return Some(name[offset + 1..].into());
             }
         }
     }
     None
 }
 
-fn explicit_namespace_before(source: &str, open: usize) -> Option<(usize, String)> {
-    let text = if source[open..].starts_with('(') {
-        source[..open]
-            .strip_suffix(".hat")
-            .or_else(|| source[..open].strip_suffix('.'))?
-    } else {
-        source[..open].strip_suffix('.')?
-    };
+fn explicit_namespace_before(source: &str, open: usize) -> Option<(String, String)> {
+    let text = &source[..open];
     if !text.ends_with('"') {
         return None;
     }
     for (opcode_start, c) in text.char_indices().rev() {
         if c == '"'
-            && crate::parser::parse_string(&text[opcode_start..]).is_ok()
+            && let Ok(opcode) = crate::parser::parse_string(&text[opcode_start..])
             && let Some(namespace) = text[..opcode_start].strip_suffix("::")
         {
-            return namespace_name_before(namespace);
+            return Some((namespace_name_before(namespace)?, opcode));
         }
     }
     None
 }
 
 fn declaration_header(header: &str) -> bool {
-    header.starts_with('@')
-        || header.starts_with("定义自制积木")
-        || header
-            .strip_prefix("import")
-            .is_some_and(|rest| rest.chars().next().is_none_or(char::is_whitespace))
+    crate::parser::declaration_header(header)
+        || crate::parser::keyword_rest(header, "pass").is_some()
 }
 
-fn context(source: &str, cursor: usize) -> Context {
-    let mut pos = 0;
-    let mut statement = 0;
+fn context(source: &str, cursor: usize, registry: &Registry, symbols: &VisibleSymbols) -> Context {
+    let owned;
+    let frames = match &symbols.scopes {
+        Some(scopes) => scopes.as_slice(),
+        None => {
+            owned = super::symbols::layout_scopes(source, cursor);
+            &owned
+        }
+    };
+    if let Some(init) = frames.iter().find(|scope| scope.header == "init") {
+        return Context::Init {
+            start: init.start - 1,
+        };
+    }
+    let target = frames.iter().rev().find_map(|scope| {
+        let header = scope.header.as_str();
+        if header.starts_with("sprite ") {
+            Some(Target::Sprite)
+        } else if header == "stage" {
+            Some(Target::Stage)
+        } else {
+            None
+        }
+    });
+    let script = frames.last().is_some_and(|scope| {
+        let header = scope.header.as_str();
+        header != "stage" && !header.starts_with("sprite ")
+    });
+    let start = frames.last().map_or(0, |scope| scope.start);
+    context_from(source, cursor, start, target, script, registry, symbols)
+}
+
+fn context_from(
+    source: &str,
+    cursor: usize,
+    start: usize,
+    target: Option<Target>,
+    is_script: bool,
+    registry: &Registry,
+    symbols: &VisibleSymbols,
+) -> Context {
+    let mut pos = start;
+    let mut statement = start;
     let mut expressions: Vec<Expression> = Vec::new();
-    // Each brace retains the enclosing target, while identifying script bodies.
-    let mut scopes: Vec<(Option<Target>, bool)> = Vec::new();
     while pos < cursor {
         let c = source[pos..].chars().next().unwrap();
         if c == '#' {
@@ -789,49 +854,80 @@ fn context(source: &str, cursor: usize) -> Context {
             if cursor < end || (cursor == end && !(end > pos + 1 && source[..end].ends_with('#'))) {
                 return Context::Blocked;
             }
-            if expressions.is_empty() && source[pos..end].contains('\n') {
+            if expressions.is_empty()
+                && (source[pos..end].contains('\n') || source[statement..pos].trim().is_empty())
+            {
                 statement = end;
             }
             pos = end;
             continue;
         }
-        if matches!(c, '$' | '@') {
+        let boundary = source[..pos]
+            .chars()
+            .next_back()
+            .is_none_or(|previous| !(previous.is_alphanumeric() || "_:@$".contains(previous)));
+        if c == '@' || (boundary && (c.is_alphabetic() || c == '_')) {
             let header = source[statement..pos].trim_start();
-            // Hat arguments occur before a script's opening brace. Data
-            // references are also valid there, while declarations aren't.
-            let in_value =
-                c == '$' || !expressions.is_empty() || scopes.last().is_some_and(|scope| scope.1);
-            if !declaration_header(header) && in_value {
+            let in_value = value_position(
+                source,
+                statement,
+                pos,
+                &expressions,
+                registry,
+                symbols,
+                is_script,
+            ) || (!expressions.is_empty()
+                && (c == '@'
+                    || (source[pos..].starts_with("global:")
+                        && !fixed_reference_prefix(
+                            source,
+                            cursor,
+                            &expressions,
+                            registry,
+                            symbols,
+                        ))));
+            let expression_start = expressions.last().is_some_and(|expression| {
+                expression.namespace.is_none() && source[expression.content..pos].trim().is_empty()
+            });
+            if !(is_script && expressions.is_empty() && header.is_empty())
+                && !declaration_header(header)
+                && in_value
+                && (!expression_start || c == '@' || source[pos..].starts_with("global:"))
+            {
                 let boolean_open = expressions
                     .last()
                     .filter(|expression| {
                         expression.open == '<'
-                            && !expression.explicit
+                            && expression.namespace.is_none()
                             && source[expression.content..pos].trim().is_empty()
                     })
                     .map(|expression| expression.content - 1);
-                if let Some(reference) =
+                if let Some(mut reference) =
                     reference_at(source, pos, cursor, boolean_open, &expressions)
                 {
-                    return Context::Reference(reference);
+                    if reference.kind == ReferenceKind::Parameter
+                        && expressions.last().is_some_and(|expression| {
+                            matches!(expression.slot, Some(ArgType::Variable | ArgType::List))
+                        })
+                    {
+                        return Context::Blocked;
+                    }
+                    reference.expected = expected_data_kind(&expressions);
+                    if !reference_completions(source, cursor, &reference, symbols).is_empty() {
+                        return Context::Reference(reference);
+                    }
                 }
             }
         }
         if c == '"' {
-            let end = string_end(source, pos);
+            let end = quoted_end(source, pos);
             if cursor < end || (cursor == end && !source[pos..end].ends_with('"')) {
                 return Context::Blocked;
             }
             pos = end;
             continue;
         }
-        if c == '/' {
-            if !source[pos..].starts_with("/'")
-                && let Some(end) = expression_operator(source, pos, &expressions)
-            {
-                pos = end;
-                continue;
-            }
+        if c == '\'' {
             let (end, closed) = menu_end(source, pos);
             if cursor < end || (cursor == end && !closed) {
                 return Context::Blocked;
@@ -839,30 +935,46 @@ fn context(source: &str, cursor: usize) -> Context {
             pos = end;
             continue;
         }
-        if matches!(c, '<' | '>')
+        if matches!(c, '<' | '>' | '/')
             && let Some(end) = expression_operator(source, pos, &expressions)
         {
             pos = end;
             continue;
         }
         match c {
-            '[' | '(' | '<' => {
-                let explicit = explicit_namespace_before(source, pos);
-                let qualified = explicit.clone().or_else(|| namespace_before(source, pos));
-                if source[..pos].ends_with('.') && qualified.is_none() {
+            '[' => {
+                let end = literal_region_end(source, pos);
+                if end <= cursor && source[..end].ends_with(']') {
+                    pos = end;
+                    continue;
+                }
+                return Context::Blocked;
+            }
+            ']' => return Context::Blocked,
+            '(' | '<' => {
+                let qualified = explicit_namespace_before(source, pos);
+                let slot = slot_before(
+                    source,
+                    statement,
+                    pos,
+                    &expressions,
+                    registry,
+                    symbols,
+                    is_script,
+                );
+                if source[..pos].ends_with('.') && slot.is_none() {
                     return Context::Blocked;
                 }
                 expressions.push(Expression {
                     open: c,
-                    start: qualified.as_ref().map_or(pos, |(start, _)| *start),
                     content: pos + 1,
-                    namespace: qualified.map(|(_, ns)| ns),
-                    explicit: explicit.is_some(),
+                    namespace: qualified.as_ref().map(|(ns, _)| ns.clone()),
+                    opcode: qualified.map(|(_, opcode)| opcode),
+                    slot,
                 });
             }
-            ']' | ')' | '>' => {
+            ')' | '>' => {
                 let expected = match c {
-                    ']' => '[',
                     ')' => '(',
                     _ => '<',
                 };
@@ -873,31 +985,14 @@ fn context(source: &str, cursor: usize) -> Context {
                 }
             }
             '{' if expressions.is_empty() => {
-                let header = source[statement..pos].trim();
-                if header == "@init" {
-                    let end = json_region_end(source, pos);
-                    if cursor < end || (cursor == end && !source[pos..end].ends_with('}')) {
-                        return Context::Init { start: pos };
-                    }
-                    pos = end;
-                    statement = pos;
-                    continue;
+                let end = literal_region_end(source, pos);
+                if cursor <= end {
+                    return Context::Blocked;
                 }
-                let inherited = scopes.last().and_then(|s| s.0);
-                let (target, script) = if header.starts_with("@sprite ") {
-                    (Some(Target::Sprite), false)
-                } else if header == "@stage" {
-                    (Some(Target::Stage), false)
-                } else {
-                    (inherited, true)
-                };
-                scopes.push((target, script));
-                statement = pos + 1;
+                pos = end;
+                continue;
             }
-            '}' if expressions.is_empty() => {
-                scopes.pop();
-                statement = pos + 1;
-            }
+            '}' if expressions.is_empty() => return Context::Blocked,
             '\n' if expressions.is_empty() => {
                 statement = pos + 1;
             }
@@ -905,63 +1000,469 @@ fn context(source: &str, cursor: usize) -> Context {
         }
         pos += c.len_utf8();
     }
-    let target = scopes.last().and_then(|s| s.0);
     let header = source[statement..cursor].trim_start();
-    if declaration_header(header) {
+    if declaration_header(header) && !(is_script && crate::parser::parse_reference(header).is_ok())
+    {
         return Context::Blocked;
     }
+    if value_position(
+        source,
+        statement,
+        cursor,
+        &expressions,
+        registry,
+        symbols,
+        is_script,
+    ) && expressions.last().is_none_or(|expression| {
+        expression.namespace.is_some() || !source[expression.content..cursor].trim().is_empty()
+    }) && source[..cursor]
+        .chars()
+        .next_back()
+        .is_none_or(|c| c.is_whitespace() || "([<,+-*/%=<>".contains(c))
+        && let Some(mut reference) = reference_at(source, cursor, cursor, None, &expressions)
+    {
+        reference.expected = expected_data_kind(&expressions);
+        return Context::Reference(reference);
+    }
     if let Some(e) = expressions.last() {
-        if e.explicit {
+        if e.namespace.is_some() {
             return Context::Blocked;
         }
+        let (content, namespace) = call_prefix(source, e.content, cursor, registry);
         return Context::Blocks {
-            start: e.start,
-            content: e.content,
+            start: e.content,
+            content,
             shape: Some(match e.open {
-                '[' => Shape::Command,
                 '(' => Shape::Reporter,
                 _ => Shape::Boolean,
             }),
-            namespace: e.namespace.clone(),
+            namespace,
             target,
             script: None,
+            expected: expected_data_kind(&expressions),
+            identity: matches!(e.slot, Some(ArgType::Variable | ArgType::List)),
         };
     }
     let start =
         statement + source[statement..cursor].len() - source[statement..cursor].trim_start().len();
-    let text = &source[start..cursor];
-    if text.starts_with('@') {
-        return Context::Blocked;
-    }
-    let mut content = start;
-    let mut namespace = None;
-    // A header may also have a namespace but has no wrapping brackets.
-    for (p, c) in text.char_indices() {
-        if c == '.'
-            && let Some((ns_start, ns)) = namespace_before(source, start + p + 1)
-            && ns_start == start
-        {
-            content = start + p + 1;
-            namespace = Some(ns);
-            break;
-        }
-    }
+    let (content, namespace) = call_prefix(source, start, cursor, registry);
     Context::Blocks {
         start,
         content,
         shape: None,
         namespace,
         target,
-        script: scopes
-            .last()
-            .map(|s| s.1)
-            .or_else(|| source.contains("@sprite").then_some(false)),
+        script: Some(is_script),
+        expected: crate::parser::assignment_parts(source[start..].split('\n').next().unwrap_or(""))
+            .map_or(DataKind::Either, |assignment| {
+                if assignment.value.starts_with('{') {
+                    DataKind::List
+                } else {
+                    DataKind::Scalar
+                }
+            }),
+        identity: false,
     }
+}
+
+fn scalar_target(text: &str, symbols: &VisibleSymbols) -> bool {
+    crate::parser::parse_reference(text).is_ok_and(|(name, global)| {
+        !symbols
+            .lists
+            .iter()
+            .any(|symbol| symbol.name == name && (!global || symbol.global))
+    })
+}
+
+fn expected_data_kind(expressions: &[Expression]) -> DataKind {
+    if expressions
+        .last()
+        .is_some_and(|expression| expression.slot == Some(ArgType::List))
+    {
+        DataKind::List
+    } else {
+        DataKind::Scalar
+    }
+}
+
+/// Parentheses delimit inputs, so their data kind comes from the enclosing
+/// template rather than the shape of a block inside those parentheses.
+fn slot_before(
+    source: &str,
+    statement: usize,
+    position: usize,
+    expressions: &[Expression],
+    registry: &Registry,
+    symbols: &VisibleSymbols,
+    is_script: bool,
+) -> Option<ArgType> {
+    let parent = expressions.last();
+    if let Some(parent) = parent.filter(|parent| parent.namespace.is_some()) {
+        let mut index = 0;
+        let mut at = parent.content;
+        while at < position {
+            at += source[at..position].len() - source[at..position].trim_start().len();
+            if at == position {
+                break;
+            }
+            let Ok(end) = crate::parser::scan_atom(&source[..position], at) else {
+                break;
+            };
+            at = end;
+            at += source[at..position].len() - source[at..position].trim_start().len();
+            if source[at..position].starts_with(',') {
+                index += 1;
+                at += 1;
+            } else {
+                break;
+            }
+        }
+        return registry
+            .templates
+            .iter()
+            .chain(symbols.procedures.iter())
+            .find(|template| {
+                template.namespace == parent.namespace && template.local_opcode == parent.opcode
+            })
+            .and_then(|template| template.slots().nth(index))
+            .map(|slot| slot.arg_type);
+    }
+    let start = parent.map_or(statement, |parent| parent.content);
+    let start = start + source[start..position].len() - source[start..position].trim_start().len();
+    let (content, namespace) = call_prefix(source, start, position, registry);
+    let shape = parent.map(|parent| {
+        if parent.open == '<' {
+            Shape::Boolean
+        } else {
+            Shape::Reporter
+        }
+    });
+    let suite = parent.is_none()
+        && source[start..]
+            .split('\n')
+            .next()
+            .is_some_and(|line| line.trim_end().ends_with(':'));
+    let assignment = crate::parser::assignment_parts(&source[statement..position]).is_some();
+    let allowed = |template: &&Template| {
+        template.namespace == namespace
+            && (!assignment_template(template) || assignment)
+            && (!suite
+                || template.shape
+                    == if is_script {
+                        Shape::Control
+                    } else {
+                        Shape::Hat
+                    })
+            && shape.map_or(
+                matches!(template.shape, Shape::Command | Shape::Control | Shape::Hat),
+                |shape| template.shape == shape,
+            )
+    };
+    let prefix = &source[content..position];
+    let mut types = symbol_data_types(symbols);
+    let current = crate::parser::scan_atom(source, position)
+        .ok()
+        .and_then(|end| {
+            source[position..end]
+                .strip_prefix('(')
+                .and_then(|value| value.strip_suffix(')'))
+        })
+        .and_then(|value| crate::parser::parse_reference(value.trim()).ok());
+    let end = parent
+        .and_then(|parent| crate::parser::scan_atom(source, parent.content - 1).ok())
+        .map(|end| end - 1)
+        .unwrap_or_else(|| {
+            source[start..]
+                .find(['\n', '\r'])
+                .map_or(source.len(), |at| start + at)
+        });
+    if end >= position {
+        let raw = source[start..end].trim().trim_end_matches(':').trim_end();
+        for inferred in [None, Some(false), Some(true)] {
+            if let Some(list) = inferred {
+                let Some((name, global)) = &current else {
+                    continue;
+                };
+                types.insert((name.clone(), *global), list);
+            }
+            for candidate_shape in [
+                Shape::Command,
+                Shape::Control,
+                Shape::Hat,
+                Shape::Reporter,
+                Shape::Boolean,
+            ] {
+                if shape.is_some_and(|shape| shape != candidate_shape) {
+                    continue;
+                }
+                let header = if candidate_shape == Shape::Boolean {
+                    format!("<{raw}>")
+                } else {
+                    raw.to_owned()
+                };
+                if let Ok(call) =
+                    registry.parse_typed(&header, candidate_shape, &symbols.procedures, &types)
+                    && allowed(&&call.template)
+                    && let Some(kind) = template_prefix_type(prefix, &call.template.tokens, false)
+                {
+                    return Some(kind);
+                }
+            }
+        }
+    }
+    let mut kinds = Vec::new();
+    for template in registry
+        .templates
+        .iter()
+        .chain(symbols.procedures.iter())
+        .filter(allowed)
+    {
+        if let Some(kind) = template_prefix_type(prefix, &template.tokens, false) {
+            kinds.push(kind);
+        }
+    }
+    let first = *kinds.first()?;
+    Some(if kinds.iter().all(|kind| *kind == first) {
+        first
+    } else {
+        ArgType::Any
+    })
+}
+
+fn call_prefix(
+    source: &str,
+    start: usize,
+    end: usize,
+    registry: &Registry,
+) -> (usize, Option<String>) {
+    let text = &source[start..end];
+    registry
+        .templates
+        .iter()
+        .filter_map(|template| template.namespace.as_ref())
+        .flat_map(|namespace| {
+            [namespace.clone(), quote(namespace)]
+                .into_iter()
+                .map(move |name| (namespace, format!("{name}.")))
+        })
+        .filter(|(_, prefix)| text.starts_with(prefix))
+        .max_by_key(|(_, prefix)| prefix.len())
+        .map_or((start, None), |(namespace, prefix)| {
+            (start + prefix.len(), Some(namespace.clone()))
+        })
+}
+
+fn assignment_operator_completions(
+    source: &str,
+    start: usize,
+    cursor: usize,
+    symbols: &VisibleSymbols,
+) -> Vec<CompletionItem> {
+    let prefix = &source[start..cursor];
+    let Ok(target_end) = crate::parser::scan_atom(prefix, 0) else {
+        return Vec::new();
+    };
+    if target_end == prefix.len() || crate::parser::parse_reference(&prefix[..target_end]).is_err()
+    {
+        return Vec::new();
+    }
+    let list = !scalar_target(&prefix[..target_end], symbols);
+    let entered = prefix[target_end..].trim_start();
+    let operator_start = cursor - entered.len();
+    let end = operator_start
+        + source[operator_start..]
+            .chars()
+            .take_while(|c| "=+-*/%".contains(*c))
+            .map(char::len_utf8)
+            .sum::<usize>();
+    ["=", "+=", "-=", "*=", "/=", "%="]
+        .into_iter()
+        .filter(|operator| operator.starts_with(entered) && (!list || *operator == "="))
+        .map(|operator| {
+            let following = source[end..].split('\n').next().unwrap_or("").trim();
+            let insertion = if following.is_empty() {
+                format!(
+                    "{operator} ${{1:{}}}",
+                    if list {
+                        "{\\}"
+                    } else if operator == "=" {
+                        "0"
+                    } else {
+                        "1"
+                    }
+                )
+            } else {
+                operator.to_owned()
+            };
+            item(
+                source,
+                operator_start,
+                end,
+                operator.into(),
+                insertion,
+                CompletionItemKind::OPERATOR,
+                "变量赋值".into(),
+            )
+        })
+        .collect()
+}
+
+/// Check the fixed words before a candidate, so a variable completion only
+/// replaces the current value and never consumes a block's command text.
+fn value_position(
+    source: &str,
+    statement: usize,
+    position: usize,
+    expressions: &[Expression],
+    registry: &Registry,
+    symbols: &VisibleSymbols,
+    is_script: bool,
+) -> bool {
+    let expression = expressions.last();
+    if is_script
+        && expression.is_none()
+        && let Some(assignment) = crate::parser::assignment_parts(&source[statement..position])
+        && scalar_target(assignment.target, symbols)
+    {
+        let value = assignment.value.trim_end();
+        return value.is_empty() || value.ends_with(['+', '-', '*', '/', '%']);
+    }
+    let (content, shape) = if let Some(expression) = expression {
+        if expression.namespace.is_some() {
+            return false;
+        }
+        (
+            expression.content,
+            Some(match expression.open {
+                '(' => Shape::Reporter,
+                _ => Shape::Boolean,
+            }),
+        )
+    } else {
+        (
+            statement + source[statement..position].len()
+                - source[statement..position].trim_start().len(),
+            None,
+        )
+    };
+    let prefix = &source[content..position];
+    if expression.is_some()
+        && prefix
+            .trim_end()
+            .ends_with(['+', '-', '*', '/', '%', '=', '<', '>'])
+    {
+        return true;
+    }
+    registry
+        .templates
+        .iter()
+        .chain(symbols.procedures.iter())
+        .any(|template| {
+            shape.map_or(template.shape == Shape::Control, |shape| {
+                template.shape == shape
+            }) && template.namespace.is_none()
+                && template_prefix_type(prefix, &template.tokens, false).is_some()
+        })
+}
+
+/// An explicit-looking prefix can also be a procedure's fixed label, such as
+/// `检查 list: @n`. Only offer reference edits when that text is an input.
+fn fixed_reference_prefix(
+    source: &str,
+    cursor: usize,
+    expressions: &[Expression],
+    registry: &Registry,
+    symbols: &VisibleSymbols,
+) -> bool {
+    let Some(expression) = expressions
+        .last()
+        .filter(|expression| expression.namespace.is_none())
+    else {
+        return false;
+    };
+    let shape = match expression.open {
+        '(' => Shape::Reporter,
+        _ => Shape::Boolean,
+    };
+    let source = &source[expression.content..cursor];
+    registry
+        .templates
+        .iter()
+        .chain(symbols.procedures.iter())
+        .any(|template| {
+            template.shape == shape
+                && template.namespace == expression.namespace
+                && template_prefix_type(source, &template.tokens, true).is_some()
+        })
+}
+
+fn template_prefix_type(source: &str, tokens: &[Token], literal_prefix: bool) -> Option<ArgType> {
+    let mut positions = vec![0];
+    for token in tokens {
+        let mut next = Vec::new();
+        for mut position in positions {
+            match token {
+                Token::Literal(literal) => {
+                    let mut matched = true;
+                    for expected in literal.chars() {
+                        if expected == ' ' {
+                            let end = position + source[position..].len()
+                                - source[position..].trim_start().len();
+                            if end == position
+                                && position < source.len()
+                                && !source[position..].starts_with(['(', '<', '\''])
+                                && !source[..position].ends_with([')', '>', '\''])
+                            {
+                                matched = false;
+                                break;
+                            }
+                            position = end;
+                        } else if position == source.len() {
+                            if literal_prefix {
+                                return Some(ArgType::Any);
+                            }
+                            matched = false;
+                            break;
+                        } else if source[position..].starts_with(expected) {
+                            position += expected.len_utf8();
+                        } else {
+                            matched = false;
+                            break;
+                        }
+                    }
+                    if matched {
+                        if literal_prefix && position == source.len() {
+                            return Some(ArgType::Any);
+                        }
+                        next.push(position);
+                    }
+                }
+                Token::Slot(slot) => {
+                    position += source[position..].len() - source[position..].trim_start().len();
+                    if !literal_prefix && position == source.len() {
+                        return Some(slot.arg_type);
+                    }
+                    if let Ok(ends) = crate::parser::scan_atom_candidates(source, position) {
+                        next.extend(ends);
+                    }
+                }
+            }
+        }
+        next.sort_unstable();
+        next.dedup();
+        // Incomplete source must not create unbounded template alternatives.
+        next.truncate(256);
+        positions = next;
+        if positions.is_empty() {
+            return None;
+        }
+    }
+    None
 }
 
 fn expression_operator(source: &str, position: usize, expressions: &[Expression]) -> Option<usize> {
     let expression = expressions.last()?;
-    if expression.explicit || !matches!(expression.open, '(' | '<') {
+    if expression.namespace.is_some() {
         return None;
     }
     let groups: Vec<_> = expressions
@@ -970,39 +1471,62 @@ fn expression_operator(source: &str, position: usize, expressions: &[Expression]
             (
                 match expression.open {
                     '(' => ')',
-                    '[' => ']',
                     _ => '>',
                 },
                 expression.content - 1,
             )
         })
         .collect();
-    super::symbols::operator_end(source, position, &groups)
+    super::symbols::operator_end(source, position, &groups).or_else(|| {
+        // At an empty comparison input, the next > is the group's closer.
+        // Keep this > as an operator while the user fills that input.
+        (expression.open == '<'
+            && source[position..].starts_with('>')
+            && source[position + 1..]
+                .trim_start()
+                .strip_prefix('>')
+                .is_some_and(|rest| {
+                    let rest = rest.trim_start();
+                    rest.is_empty() || rest.starts_with([']', ')', '>', ':', ','])
+                })
+            && crate::parser::scan_atom(&source[..position], expression.content)
+                .ok()
+                .is_some_and(|end| source[end..position].trim().is_empty()))
+        .then_some(position + 1)
+    })
 }
 
-fn json_region_end(source: &str, start: usize) -> usize {
-    let mut depth = 0;
-    let mut pos = start;
-    while pos < source.len() {
-        match source.as_bytes()[pos] {
-            b'"' => {
-                pos = string_end(source, pos);
+/// Skip a preceding list initializer or embedded data object without treating
+/// its braces as script scope. Completion inside data uses its own schema.
+fn literal_region_end(source: &str, start: usize) -> usize {
+    let mut groups = Vec::new();
+    let mut position = start;
+    while position < source.len() {
+        let c = source[position..].chars().next().unwrap();
+        match c {
+            '"' => {
+                position = quoted_end(source, position);
                 continue;
             }
-            b'#' => {
-                pos = comment_end(source, pos);
+            '\'' => {
+                position = menu_end(source, position).0;
                 continue;
             }
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return pos + 1;
+            '#' => {
+                position = comment_end(source, position);
+                continue;
+            }
+            '{' => groups.push('}'),
+            '[' => groups.push(']'),
+            '}' | ']' if groups.last() == Some(&c) => {
+                groups.pop();
+                if groups.is_empty() {
+                    return position + 1;
                 }
             }
             _ => {}
         }
-        pos += source[pos..].chars().next().unwrap().len_utf8();
+        position += c.len_utf8();
     }
     source.len()
 }
@@ -1090,7 +1614,7 @@ fn data_fields(schema: DataSchema) -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// Complete the same data notation used by build files and sprite @init.
+/// Complete the same data notation used by build files and sprite init.
 pub fn complete_config(source: &str, position: Position) -> Vec<CompletionItem> {
     let Some(cursor) = byte_offset(source, position) else {
         return Vec::new();
@@ -1139,10 +1663,7 @@ fn data_completions(
         if c == '"' {
             // Data strings cannot cross physical lines. A later field's quote
             // must never become this edit's closing quote.
-            let line_end = source[pos..]
-                .find(['\r', '\n'])
-                .map_or(source.len(), |offset| pos + offset);
-            let end = string_end(source, pos).min(line_end);
+            let end = quoted_end(source, pos);
             if cursor < end || (cursor == end && !source[pos + 1..end].ends_with('"')) {
                 return data_candidates(source, cursor, pos, end, true, frame);
             }
@@ -1448,15 +1969,140 @@ mod tests {
     }
 
     #[test]
+    fn python_style_bodies_complete_with_colons_and_indentation() {
+        assert_eq!(choose("sta|", "event_whenflagclicked"), "start:\n    ");
+        assert_eq!(
+            choose("start:\n    i|", "control_if"),
+            "start:\n    if <>:\n        "
+        );
+        assert_eq!(
+            choose("start:\n    loo|:\n        pass", "control_repeat"),
+            "start:\n    loop 0:\n        pass"
+        );
+        assert_eq!(
+            choose("start:\n    wh|", "control_while"),
+            "start:\n    while <>:\n        "
+        );
+        assert_eq!(
+            choose("start:\n    while t|", "control_forever"),
+            "start:\n    while true:\n        "
+        );
+        assert_eq!(
+            choose("\"自定义拓展\".当完成:\n    loo|", "control_repeat"),
+            "\"自定义拓展\".当完成:\n    loop 0:\n        "
+        );
+        let (source, cursor) = marked("start:\n    if <true>:\n        pass\n    el|");
+        let items = complete(&source, cursor, &Registry::new());
+        assert!(items.iter().any(|item| item.label.starts_with("elif ")));
+        let otherwise = items.iter().find(|item| item.label == "else").unwrap();
+        assert_eq!(
+            apply(&source, otherwise),
+            "start:\n    if <true>:\n        pass\n    else:\n        "
+        );
+        let (source, cursor) = marked("|");
+        let items = complete(&source, cursor, &Registry::new());
+        assert!(items.iter().any(|item| item.label == "start"));
+        assert!(!items.iter().any(|item| item.label == "当绿旗被点击"));
+    }
+
+    #[test]
+    fn indented_init_and_target_context_recover_after_dedent() {
+        let (source, cursor) = marked(
+            "sprite \"玩家\":\n    init:\n        x: 1\n        rot|\n    start:\n        pass",
+        );
+        let items = complete(&source, cursor, &Registry::new());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "rotationStyle");
+        assert!(apply(&source, &items[0]).contains("rotationStyle: \"all around\""));
+        let (source, cursor) = marked("stage:\n    start:\n        移|");
+        assert!(complete(&source, cursor, &Registry::new()).is_empty());
+        let (source, cursor) =
+            marked("sprite \"玩家\":\n    init:\n        pass\n    start:\n        移|");
+        assert!(
+            complete(&source, cursor, &Registry::new())
+                .iter()
+                .any(|item| item.label == "移动(0)步")
+        );
+        let (source, cursor) = marked("sprite \"玩家\":\n    init:\n        x: 1\n    sta|");
+        assert!(
+            complete(&source, cursor, &Registry::new())
+                .iter()
+                .any(|item| item.label == "start")
+        );
+        let (source, cursor) = marked(
+            "sprite \"玩家\":\n    items = {1, 2}\n    init:\n        costumes: [{name: \"猫\", path: \"cat.svg\"}]\n    sta|",
+        );
+        assert!(
+            complete(&source, cursor, &Registry::new())
+                .iter()
+                .any(|item| item.label == "start")
+        );
+    }
+
+    #[test]
+    fn modern_declarations_and_menus_do_not_offer_value_completions() {
+        let symbols = data_symbols();
+        for mark in [
+            "items = {sc|}",
+            "score = sc|",
+            "def 示例 @sc|:",
+            "sprite \"玩家\":\n    init:\n        x: \"sc|\"",
+            "移到 ('sc|')",
+            "说 'text # \\' sc|'",
+        ] {
+            let (_, items) = symbol_candidates(mark, &symbols);
+            assert!(items.is_empty(), "{mark}");
+        }
+        let (source, cursor) = marked(
+            "sprite \"玩家\":\n    score = 0\n    def 等待 @seconds:\n        等待 (@sec|) 秒\n    start:\n        pass",
+        );
+        let items = complete(&source, cursor, &Registry::new());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "@seconds");
+    }
+
+    #[test]
+    fn compact_scalar_inputs_nest_reporters_without_command_brackets() {
+        let completed = choose("start:\n    说(连|)", "operator_join");
+        assert_eq!(completed, "start:\n    说(连接(\"\")和(\"\"))");
+        compile_source(&format!(
+            "sprite \"玩家\":\n    init:\n        pass\n{}",
+            completed
+                .lines()
+                .map(|line| format!("    {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+        assert_eq!(
+            choose("start:\n    等待|", "control_wait"),
+            "start:\n    等待(0)秒"
+        );
+        for mark in [
+            "start:\n    [移|]",
+            "start:\n    说 sc|",
+            "start:\n    显示变量(@sc|)",
+        ] {
+            let (_, items) = symbol_candidates(mark, &data_symbols());
+            assert!(items.is_empty(), "{mark}: {items:?}");
+        }
+        let (source, items) = symbol_candidates("start:\n    lo|旧 = {1}", &data_symbols());
+        let list = items.iter().find(|item| item.label == "logs").unwrap();
+        assert_eq!(apply(&source, list), "start:\n    logs = {1}");
+        let (source, items) = symbol_candidates("start:\n    logs |", &data_symbols());
+        assert_eq!(items.len(), 1);
+        assert_eq!(apply(&source, &items[0]), "start:\n    logs = {}");
+    }
+
+    #[test]
     fn incomplete_chinese_command_applies_and_compiles() {
         let source = choose(
-            "@sprite \"玩家\" {\n @init {}\n 当绿旗被点击 {\n  [移|]\n }\n}",
+            "sprite \"玩家\" :\n    init :\n        pass\n    start :\n        移|",
             "motion_movesteps",
         );
-        assert!(source.contains("[移动 0 步]"));
+        assert!(source.contains("移动(0)步"));
         assert!(!source.contains("]]"));
         compile_source(&source);
-        assert_eq!(choose("[移动|", "motion_movesteps"), "[移动 0 步]");
+        assert_eq!(choose("移动|", "motion_movesteps"), "移动(0)步");
     }
 
     #[test]
@@ -1468,7 +2114,7 @@ mod tests {
         let boolean = choose("<鼠|>", "sensing_mousedown");
         assert_eq!(boolean, "<鼠标按下?>");
         registry.parse(&boolean, Shape::Boolean, &[]).unwrap();
-        assert_eq!(choose("[说 (x|)]", "motion_xposition"), "[说 (x 坐标)]");
+        assert_eq!(choose("说 (x|)", "motion_xposition"), "说 (x 坐标)");
     }
 
     #[test]
@@ -1476,22 +2122,26 @@ mod tests {
         let registry = Registry::new();
         let mut omitted = BTreeSet::new();
         for template in &registry.templates {
-            let Some((_, snippet)) = completion_text(template, &registry) else {
+            let Some((_, snippet)) = completion_text_visible(template, &registry, &[]) else {
                 omitted.insert(template.opcode.as_str());
                 continue;
             };
             let text = expand(&snippet);
             let call = registry
-                .parse(&text, template.shape, &[])
+                .parse_typed(
+                    &text,
+                    template.shape,
+                    &[],
+                    &template_default_types(template),
+                )
                 .unwrap_or_else(|error| panic!("{}: {text}: {error}", template.opcode));
             assert_eq!(call.template.opcode, template.opcode);
         }
-        // Lists are also general values: this particular display text matches
-        // both list membership and the ordinary string-contains operator.
-        assert_eq!(omitted, BTreeSet::from(["data_listcontainsitem"]));
+        // Known scalar/list defaults disambiguate otherwise identical text.
+        assert!(omitted.is_empty(), "{omitted:?}");
         let (source, cursor) = marked("<|");
         let items = complete(&source, cursor, &registry);
-        assert!(!items.iter().any(|c| {
+        assert!(items.iter().any(|c| {
             c.detail
                 .as_ref()
                 .is_some_and(|d| d.starts_with("data_listcontainsitem ·"))
@@ -1504,37 +2154,16 @@ mod tests {
     }
 
     #[test]
-    fn hats_controls_and_existing_body() {
-        let source = choose(
-            "@sprite \"玩家\" {\n @init {}\n 当绿|\n}",
-            "event_whenflagclicked",
-        );
-        compile_source(&source);
-        let source = choose(
-            "@sprite \"玩家\" {\n @init {}\n 当绿旗被点击 {\n  如果|\n }\n}",
-            "control_if",
-        );
-        assert!(source.contains("如果 <> 那么 {"));
-        compile_source(&source);
-        let source = choose("当绿| { [等待 1 秒] }", "event_whenflagclicked");
-        assert_eq!(source, "当绿旗被点击 { [等待 1 秒] }");
-        compile_source(&source);
-    }
-
-    #[test]
     fn utf16_ranges_preserve_emoji_and_chinese_before_the_edit() {
-        let (source, cursor) = marked("# 😀中文 # [移|]");
-        assert_eq!(cursor.character, 11);
+        let (source, cursor) = marked("# 😀中文 # 移|");
+        assert_eq!(cursor.character, 10);
         let candidates = complete(&source, cursor, &Registry::new());
-        let selected = candidates
-            .iter()
-            .find(|c| c.label == "[移动 0 步]")
-            .unwrap();
+        let selected = candidates.iter().find(|c| c.label == "移动(0)步").unwrap();
         let Some(CompletionTextEdit::Edit(edit)) = &selected.text_edit else {
             panic!();
         };
         assert_eq!(edit.range.start.character, 9);
-        assert_eq!(apply(&source, selected), "# 😀中文 # [移动 0 步]");
+        assert_eq!(apply(&source, selected), "# 😀中文 # 移动(0)步");
         assert!(byte_offset("😀", Position::new(0, 1)).is_none());
         assert_eq!(byte_offset("😀\r\n中", Position::new(1, 1)), Some(9));
     }
@@ -1542,16 +2171,16 @@ mod tests {
     #[test]
     fn comments_strings_and_menu_contents_do_not_offer_blocks() {
         for source in [
-            "# 注释 [移|",
-            "#\n块注释\n[移|\n#",
-            "# 行内 [移| #",
-            "[说 \"[移|\"]",
-            "[移到 /'[移|'/]",
-            "[移到 /'a/# [移|'/]",
-            r"[移到 /'a\'/# [移|'/]",
-            r"[移到 /'a\\/# [移|'/]",
-            "[移到 /'unfinished/# [移|",
-            "[说 \"# [移|\"]",
+            "# 注释 移|",
+            "#\n块注释\n移|\n#",
+            "# 行内 移| #",
+            "说 (\"移|\")",
+            "移到 ('移|')",
+            "移到 ('a/# 移|')",
+            r"移到 ('a\'/# 移|')",
+            r"移到 ('a\\/# 移|')",
+            "移到 ('unfinished/# 移|",
+            "说 (\"# 移|\")",
         ] {
             let (source, cursor) = marked(source);
             assert!(
@@ -1560,12 +2189,12 @@ mod tests {
             );
         }
         assert_eq!(
-            choose("# 注释\n[移|]", "motion_movesteps"),
-            "# 注释\n[移动 0 步]"
+            choose("# 注释\n移|", "motion_movesteps"),
+            "# 注释\n移动(0)步"
         );
         assert_eq!(
-            choose("#\n块\n#\n[移|]", "motion_movesteps"),
-            "#\n块\n#\n[移动 0 步]"
+            choose("#\n块\n#\n移|", "motion_movesteps"),
+            "#\n块\n#\n移动(0)步"
         );
     }
 
@@ -1575,16 +2204,16 @@ mod tests {
         assert_eq!(choose("<1 < (x|)>", "motion_xposition"), "<1 < (x 坐标)>");
         assert_eq!(choose("<1 > (x|)>", "motion_xposition"), "<1 > (x 坐标)>");
         assert_eq!(
-            choose("[移到 /'*'/]\n[移|]", "motion_movesteps"),
-            "[移到 /'*'/]\n[移动 0 步]"
+            choose("移到 ('*')\n移|", "motion_movesteps"),
+            "移到 ('*')\n移动(0)步"
         );
         assert_eq!(
-            choose("[移到 /''/]\n[移|]", "motion_movesteps"),
-            "[移到 /''/]\n[移动 0 步]"
+            choose("移到 ('')\n移|", "motion_movesteps"),
+            "移到 ('')\n移动(0)步"
         );
         assert_eq!(
-            choose("[移到 /'unfinished/#\n[移|]", "motion_movesteps"),
-            "[移到 /'unfinished/#\n[移动 0 步]"
+            choose("移到 'unfinished/#\n移|", "motion_movesteps"),
+            "移到 'unfinished/#\n移动(0)步"
         );
     }
 
@@ -1592,36 +2221,30 @@ mod tests {
     fn infix_right_operands_complete_with_spacing_nesting_and_utf16() {
         let symbols = data_symbols();
         for (marked_source, expected) in [
-            ("($score / $sc|旧)", "($score / $score)"),
-            ("($score/$sc|旧)", "($score/$score)"),
-            ("($score\n/\n$sc|旧)", "($score\n/\n$score)"),
-            ("(($score + 1)/$sc|旧)", "(($score + 1)/$score)"),
-            ("($score + $sc|旧)", "($score + $score)"),
-            ("($score-$sc|旧)", "($score-$score)"),
-            ("($score*$sc|旧)", "($score*$score)"),
-            ("($score mod $sc|旧)", "($score mod $score)"),
-            ("<$score > $sc|旧>", "<$score > $score>"),
-            ("<$score>$sc|旧>", "<$score>$score>"),
-            ("<$score\n>\n$sc|旧>", "<$score\n>\n$score>"),
-            ("<$score=$sc|旧>", "<$score=$score>"),
-            ("<$score<$sc|旧>", "<$score<$score>"),
-            (
-                "# 😀 # <$score>$\"😀 |旧\">",
-                "# 😀 # <$score>$\"😀 分数\">",
-            ),
-            (
-                "# 😀 # ($score/$\"😀 |旧\")",
-                "# 😀 # ($score/$\"😀 分数\")",
-            ),
+            ("(score / sc|旧)", "(score / score)"),
+            ("(score/sc|旧)", "(score/score)"),
+            ("(score\n/\nsc|旧)", "(score\n/\nscore)"),
+            ("((score + 1)/sc|旧)", "((score + 1)/score)"),
+            ("(score + sc|旧)", "(score + score)"),
+            ("(score-sc|旧)", "(score-score)"),
+            ("(score*sc|旧)", "(score*score)"),
+            ("(score % sc|旧)", "(score % score)"),
+            ("<score > sc|旧>", "<score > score>"),
+            ("<score>sc|旧>", "<score>score>"),
+            ("<score\n>\nsc|旧>", "<score\n>\nscore>"),
+            ("<score=sc|旧>", "<score=score>"),
+            ("<score<sc|旧>", "<score<score>"),
+            ("# 😀 # <score>特殊分|旧>", "# 😀 # <score>特殊分数>"),
+            ("# 😀 # (score/特殊分|旧)", "# 😀 # (score/特殊分数)"),
         ] {
             let (source, items) = symbol_candidates(marked_source, &symbols);
             assert_eq!(items.len(), 1, "{marked_source}: {items:?}");
             assert_eq!(apply(&source, &items[0]), expected, "{marked_source}");
         }
-        for marked_source in ["<$score > $|>", "($score / $|)", "<$score>$|"] {
+        for marked_source in ["<score > |>", "(score / |)", "<score>|>"] {
             let (_, items) = symbol_candidates(marked_source, &symbols);
             assert!(
-                items.iter().any(|item| item.label == "$score"),
+                items.iter().any(|item| item.label == "score"),
                 "{marked_source}"
             );
         }
@@ -1631,19 +2254,19 @@ mod tests {
     fn nested_boolean_slots_do_not_consume_a_later_template_argument() {
         let symbols = data_symbols();
         for prior in [
-            "ext.<模板 <@ready> 1>",
-            "ext.<模板 <@ready>\n1>",
-            "ext.<模板 <true> 1>",
-            "ext.<模板 <$score>1> 2>",
-            "ext.<模板 ext.<模板 <@ready> 1> 2>",
-            r#"ext::"check".<<@ready>, 1>"#,
+            "<ext.模板 <@ready> (1)>",
+            "<ext.模板 <@ready>\n(1)>",
+            "<ext.模板 <true> (1)>",
+            "<ext.模板 <score > 1> (2)>",
+            "<ext.模板 <ext.模板 <@ready> (1)> (2)>",
+            r#"<ext::"check"(<@ready>, (1))>"#,
         ] {
-            let marked = format!("[说 {prior}]\n[说 $sc|旧]");
+            let marked = format!("说({prior})\n说 (sc|旧)");
             let (source, items) = symbol_candidates(&marked, &symbols);
             assert_eq!(items.len(), 1, "{prior}: {items:?}");
             assert_eq!(
                 apply(&source, &items[0]),
-                format!("[说 {prior}]\n[说 $score]")
+                format!("说({prior})\n说 (score)")
             );
         }
     }
@@ -1652,20 +2275,21 @@ mod tests {
     fn init_keys_enums_and_existing_quotes() {
         let registry = Registry::new();
         for marked_source in [
-            "@sprite \"玩家\" { @init { | } }",
-            "@sprite \"玩家\" { @init { \"rot|\" } }",
+            "sprite \"玩家\" :\n    init :\n        |",
+            "sprite \"玩家\" :\n    init :\n        \"rot|\"",
         ] {
             let (source, cursor) = marked(marked_source);
             let items = complete(&source, cursor, &registry);
             let selected = items.iter().find(|i| i.label == "rotationStyle").unwrap();
             compile_source(&apply(&source, selected));
         }
-        let (source, cursor) = marked("@sprite \"玩家\" { @init { \"rotationStyle\": \"le|\" } }");
+        let (source, cursor) =
+            marked("sprite \"玩家\" :\n    init :\n        \"rotationStyle\": \"le|\"");
         let items = complete(&source, cursor, &registry);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "left-right");
         compile_source(&apply(&source, &items[0]));
-        let (source, cursor) = marked("@sprite \"玩家\" { @init { \"visible\": f| } }");
+        let (source, cursor) = marked("sprite \"玩家\" :\n    init :\n        \"visible\": f|");
         let items = complete(&source, cursor, &registry);
         assert_eq!(items[0].label, "false");
         compile_source(&apply(&source, &items[0]));
@@ -1674,18 +2298,18 @@ mod tests {
     #[test]
     fn init_nested_assets_and_duplicate_fields_are_contextual() {
         let registry = Registry::new();
-        let (source, cursor) = marked("@sprite \"玩家\" { @init { \"x\": 1, | } }");
+        let (source, cursor) = marked("sprite \"玩家\" :\n    init :\n        \"x\": 1, |");
         let items = complete(&source, cursor, &registry);
         assert!(!items.iter().any(|i| i.label == "x"));
         assert!(items.iter().any(|i| i.label == "y"));
-        let (source, cursor) = marked("@sprite \"玩家\" { @init { \"sounds\": [{ | }] } }");
+        let (source, cursor) = marked("sprite \"玩家\" :\n    init :\n        \"sounds\": [{ | }]");
         let items = complete(&source, cursor, &registry);
         assert_eq!(items.len(), 2);
         assert!(items.iter().any(|i| i.label == "path"));
         assert!(!items.iter().any(|i| i.label == "rotationCenterX"));
         for source in [
-            "@sprite \"玩家\" { @init { # 注释 |\n } }",
-            "@sprite \"玩家\" { @init { \"costumes\": [{ \"path\": \"移|\" }] } }",
+            "sprite \"玩家\" :\n    init :\n        # 注释 |",
+            "sprite \"玩家\" :\n    init :\n        \"costumes\": [{ \"path\": \"移|\" }]",
         ] {
             let (source, cursor) = marked(source);
             assert!(complete(&source, cursor, &registry).is_empty());
@@ -1695,10 +2319,10 @@ mod tests {
     #[test]
     fn bare_init_fields_complete_after_newlines_without_adding_quotes() {
         for marked_source in [
-            "@sprite \"玩家\" { @init { rot| } }",
-            "@sprite \"玩家\" { @init { x: 1\n rot| } }",
-            "@sprite \"玩家\" { @init { x: 1 # 坐标\n rot| } }",
-            "@sprite \"玩家\" { @init { x: 1\n #\n 注释\n #\n rot| } }",
+            "sprite \"玩家\" :\n    init :\n        rot|",
+            "sprite \"玩家\" :\n    init :\n        x: 1\n        rot|",
+            "sprite \"玩家\" :\n    init :\n        x: 1 # 坐标\n        rot|",
+            "sprite \"玩家\" :\n    init :\n        x: 1\n        #\n        注释\n        #\n        rot|",
         ] {
             let (source, cursor) = marked(marked_source);
             let items = complete(&source, cursor, &Registry::new());
@@ -1711,12 +2335,13 @@ mod tests {
             assert!(!result.contains("\"rotationStyle\""));
             compile_source(&result);
         }
-        let (source, cursor) = marked("@sprite \"玩家\" { @init { x: 1\n | } }");
+        let (source, cursor) = marked("sprite \"玩家\" :\n    init :\n        x: 1\n        |");
         let items = complete(&source, cursor, &Registry::new());
         assert!(!items.iter().any(|item| item.label == "x"));
         assert!(items.iter().any(|item| item.label == "y"));
-        let (source, cursor) =
-            marked("@sprite \"玩家\" { @init { sounds: [{ name: \"音效\"\n pa| }] } }");
+        let (source, cursor) = marked(
+            "sprite \"玩家\" :\n    init :\n        sounds: [{ name: \"音效\"\n        pa| }]",
+        );
         let items = complete(&source, cursor, &Registry::new());
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "path");
@@ -1806,12 +2431,13 @@ mod tests {
             stage_only: false,
             procedure: None,
             warp: false,
+            branch_count: 0,
         });
-        let (source, cursor) = marked("\"自定义 拓展\".[展|]");
+        let (source, cursor) = marked("\"自定义 拓展\".展|");
         let items = complete(&source, cursor, &registry);
         assert_eq!(items.len(), 1);
         let applied = apply(&source, &items[0]);
-        assert_eq!(applied, "\"自定义 拓展\".[展示 \"$价格}\\\\路径\"]");
+        assert_eq!(applied, "\"自定义 拓展\".展示(\"$价格}\\\\路径\")");
         registry.parse(&applied, Shape::Command, &[]).unwrap();
     }
 
@@ -1846,13 +2472,14 @@ mod tests {
                 stage_only: false,
                 procedure: None,
                 warp: false,
+                branch_count: 0,
             });
-            let (source, cursor) = marked("自定义拓展.[选|]");
+            let (source, cursor) = marked("自定义拓展.选|");
             let items = complete(&source, cursor, &registry);
             assert_eq!(items.len(), 1, "{value:?}");
             let applied = apply(&source, &items[0]);
             let expected = crate::parser::format_menu(value);
-            assert_eq!(applied, format!("自定义拓展.[选择 {expected}]"));
+            assert_eq!(applied, format!("自定义拓展.选择{expected}"));
             registry.parse(&applied, Shape::Command, &[]).unwrap();
             assert_eq!(crate::parser::parse_menu(&expected).unwrap(), value);
         }
@@ -1882,22 +2509,23 @@ mod tests {
                     stage_only: false,
                     procedure: None,
                     warp: false,
+                    branch_count: 0,
                 });
             }
             for prefix in [namespace.to_owned(), quote(namespace)] {
-                let (source, cursor) = marked(&format!("{prefix}.[展|]"));
+                let (source, cursor) = marked(&format!("{prefix}.展|"));
                 let items = complete(&source, cursor, &registry);
                 assert_eq!(items.len(), 1, "{source}: {items:?}");
                 let applied = apply(&source, &items[0]);
-                assert_eq!(applied, format!("{namespace}.[展示]"));
+                assert_eq!(applied, format!("{namespace}.展示"));
                 registry.parse(&applied, Shape::Command, &[]).unwrap();
             }
             for number in ["1", "1.2", "-1", "1e-2"] {
-                let (source, cursor) = marked(&format!("({number}-{namespace}.(数|))"));
+                let (source, cursor) = marked(&format!("({number}-({namespace}.数|))"));
                 let items = complete(&source, cursor, &registry);
                 assert_eq!(items.len(), 1, "{source}: {items:?}");
                 let applied = apply(&source, &items[0]);
-                assert_eq!(applied, format!("({number}-{namespace}.(数字))"));
+                assert_eq!(applied, format!("({number}-({namespace}.数字))"));
                 registry.parse(&applied, Shape::Reporter, &[]).unwrap();
             }
         }
@@ -1908,14 +2536,14 @@ mod tests {
     #[test]
     fn extension_completion_preserves_reference_operands_before_minus() {
         for (reference, name) in [
-            ("$score", "score"),
+            ("score", "score"),
             ("@value", "value"),
-            ("$global:score", "score"),
-            ("$list:items", "items"),
-            ("$global:list:items", "items"),
-            ("$变量", "变量"),
+            ("global:score", "score"),
+            ("items", "items"),
+            ("global:items", "items"),
+            ("变量", "变量"),
             ("@参数", "参数"),
-            ("$\"变量 with spaces\"", "变量 with spaces"),
+            ("变量名", "变量名"),
             ("@\"参数 with spaces\"", "参数 with spaces"),
         ] {
             for namespace in ["ext", "scratch-tensor-extension", "自定义拓展.min"] {
@@ -1933,14 +2561,24 @@ mod tests {
                         stage_only: false,
                         procedure: None,
                         warp: false,
+                        branch_count: 0,
                     });
                 }
-                let (source, cursor) = marked(&format!("({reference}-{namespace}.(数|))"));
+                let separator = if reference.contains(':') || reference.starts_with('@') {
+                    "-"
+                } else {
+                    " - "
+                };
+                let (source, cursor) =
+                    marked(&format!("({reference}{separator}({namespace}.数|))"));
                 let items = complete(&source, cursor, &registry);
                 assert_eq!(items.len(), 1, "{source}: {items:?}");
-                assert_eq!(items[0].label, format!("{namespace}.(数字)"));
+                assert_eq!(items[0].label, format!("{namespace}.数字"));
                 let applied = apply(&source, &items[0]);
-                assert_eq!(applied, format!("({reference}-{namespace}.(数字))"));
+                assert_eq!(
+                    applied,
+                    format!("({reference}{separator}({namespace}.数字))")
+                );
                 registry.parse(&applied, Shape::Reporter, &[]).unwrap();
             }
         }
@@ -1965,9 +2603,10 @@ mod tests {
                 stage_only: false,
                 procedure: None,
                 warp: false,
+                branch_count: 0,
             });
         }
-        let (source, cursor) = marked("\"自定义拓展\".[展|]");
+        let (source, cursor) = marked("\"自定义拓展\".展|");
         let items = complete(&source, cursor, &registry);
         assert_eq!(items.len(), 2);
         for selected in &items {
@@ -1986,29 +2625,221 @@ mod tests {
         }
     }
 
+    fn control_template(opcode: &str, branches: usize) -> Template {
+        let mut value = crate::registry::input("VALUE", ArgType::Number);
+        value.default = serde_json::json!(3);
+        let mut list = crate::registry::input("LIST", ArgType::List);
+        list.default = serde_json::json!("logs");
+        Template {
+            opcode: format!("custom_{opcode}"),
+            shape: Shape::Control,
+            namespace: Some("分支 扩展😀".into()),
+            extension_id: Some("custom".into()),
+            local_opcode: Some(opcode.into()),
+            tokens: crate::registry::tokens_from_text("分支 [VALUE] 记录 [LIST]", &[value, list])
+                .unwrap(),
+            sprite_only: false,
+            stage_only: false,
+            procedure: None,
+            warp: false,
+            branch_count: branches,
+        }
+    }
+
+    #[test]
+    fn extension_controls_complete_every_branch_and_preserve_existing_suites() {
+        for branches in [1, 3] {
+            let mut registry = Registry::new();
+            let template = control_template("choose", branches);
+            registry.templates.push(template.clone());
+            let (source, cursor) = marked("start:\n    \"分支 扩展😀\".分|");
+            let items = complete(&source, cursor, &registry);
+            assert_eq!(items.len(), 1, "{items:?}");
+            let applied = apply(&source, &items[0]);
+            let expected = format!(
+                "start:\n    \"分支 扩展😀\".分支(3)记录(logs):\n        pass{}",
+                "\n    else:\n        pass".repeat(branches - 1)
+            );
+            assert_eq!(applied, expected);
+            let header = applied.lines().nth(1).unwrap().trim().trim_end_matches(':');
+            let call = registry
+                .parse_typed(
+                    header,
+                    Shape::Control,
+                    &[],
+                    &template_default_types(&template),
+                )
+                .unwrap();
+            assert_eq!(call.template.branch_count, branches);
+
+            let (source, cursor) =
+                marked("start:\n    \"分支 扩展😀\".分|:\n        说 (\"保留\")");
+            let items = complete(&source, cursor, &registry);
+            assert_eq!(items.len(), 1);
+            assert_eq!(
+                apply(&source, &items[0]),
+                "start:\n    \"分支 扩展😀\".分支(3)记录(logs):\n        说 (\"保留\")"
+            );
+        }
+    }
+
+    #[test]
+    fn huge_extension_branch_counts_do_not_allocate_snippets() {
+        let mut registry = Registry::new();
+        registry
+            .templates
+            .push(control_template("huge", usize::MAX));
+        let (source, cursor) = marked("start:\n    \"分支 扩展😀\".分|");
+        assert!(complete(&source, cursor, &registry).is_empty());
+        let (source, cursor) = marked("start:\n    \"分支 扩展😀\".分|:\n        pass");
+        let items = complete(&source, cursor, &registry);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            apply(&source, &items[0]),
+            "start:\n    \"分支 扩展😀\".分支(3)记录(logs):\n        pass"
+        );
+    }
+
+    #[test]
+    fn ambiguous_extension_controls_offer_explicit_opcodes_with_all_branches() {
+        let mut registry = Registry::new();
+        for opcode in ["chooseA", "chooseB"] {
+            registry.templates.push(control_template(opcode, 2));
+        }
+        let (source, cursor) = marked("start:\n    \"分支 扩展😀\".分|");
+        let items = complete(&source, cursor, &registry);
+        assert_eq!(items.len(), 2, "{items:?}");
+        for item in &items {
+            let applied = apply(&source, item);
+            assert!(applied.contains("::\"choose"), "{applied}");
+            assert!(
+                applied.ends_with(":\n        pass\n    else:\n        pass"),
+                "{applied}"
+            );
+            let header = applied.lines().nth(1).unwrap().trim().trim_end_matches(':');
+            let call = registry
+                .parse_typed(
+                    header,
+                    Shape::Control,
+                    &[],
+                    &template_default_types(registry.templates.last().unwrap()),
+                )
+                .unwrap();
+            assert!(
+                item.detail
+                    .as_ref()
+                    .unwrap()
+                    .starts_with(&call.template.opcode)
+            );
+        }
+    }
+
+    #[test]
+    fn extension_control_inputs_complete_scalar_and_list_names_by_slot() {
+        let mut registry = Registry::new();
+        registry.templates.push(control_template("choose", 2));
+        let symbols = data_symbols();
+        for (marked_source, expected, excluded) in [
+            (
+                "start:\n    \"分支 扩展😀\".分支 (sc|旧) 记录 (logs):\n        pass",
+                "score",
+                "logs",
+            ),
+            (
+                "start:\n    \"分支 扩展😀\".分支 (3) 记录 (lo|旧):\n        pass",
+                "logs",
+                "score",
+            ),
+            (
+                "start:\n    \"分支 扩展😀\".分支 (3) 记录 (|):\n        pass",
+                "logs",
+                "score",
+            ),
+            (
+                "start:\n    \"分支 扩展😀\"::\"choose\"((sc|旧), (logs)):\n        pass",
+                "score",
+                "logs",
+            ),
+            (
+                "start:\n    \"分支 扩展😀\"::\"choose\"((3), (|)):\n        pass",
+                "logs",
+                "score",
+            ),
+        ] {
+            let (source, cursor) = marked(marked_source);
+            let items = complete_with_symbols(&source, cursor, &registry, &symbols);
+            let chosen = items
+                .iter()
+                .find(|item| item.label == expected)
+                .unwrap_or_else(|| panic!("{marked_source}: {items:?}"));
+            assert!(
+                !items.iter().any(|item| item.label == excluded),
+                "{marked_source}: {items:?}"
+            );
+            assert!(!apply(&source, chosen).contains('旧'));
+            assert!(apply(&source, chosen).ends_with(":\n        pass"));
+        }
+    }
+
+    #[test]
+    fn existing_control_suites_disambiguate_same_text_command_slots() {
+        let mut registry = Registry::new();
+        let control = control_template("choose", 1);
+        let mut command = control.clone();
+        command.opcode = "custom_show".into();
+        command.local_opcode = Some("show".into());
+        command.shape = Shape::Command;
+        command.branch_count = 0;
+        for token in &mut command.tokens {
+            if let Token::Slot(slot) = token
+                && slot.arg_type == ArgType::List
+            {
+                slot.arg_type = ArgType::String;
+                slot.default = serde_json::json!("");
+            }
+        }
+        registry.templates.extend([command, control]);
+        let (source, cursor) = marked("start:\n    \"分支 扩展😀\".分|:\n        pass");
+        let items = complete(&source, cursor, &registry);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(
+            items[0]
+                .detail
+                .as_ref()
+                .unwrap()
+                .starts_with("custom_choose")
+        );
+
+        let (source, cursor) =
+            marked("start:\n    \"分支 扩展😀\".分支 (3) 记录 (|):\n        pass");
+        let items = complete_with_symbols(&source, cursor, &registry, &data_symbols());
+        assert!(items.iter().any(|item| item.label == "logs"));
+        assert!(!items.iter().any(|item| item.label == "score"), "{items:?}");
+    }
+
     #[test]
     fn explicit_targets_filter_only_when_known() {
         let registry = Registry::new();
-        let (source, cursor) = marked("@stage { 当绿旗被点击 { [移|] } }");
+        let (source, cursor) = marked("stage :\n    start :\n        移|");
         assert!(complete(&source, cursor, &registry).is_empty());
-        let (source, cursor) = marked("@sprite \"玩家\" { @init {}\n 当| }");
+        let (source, cursor) = marked("sprite \"玩家\" :\n    init :\n        pass\n    当|");
         let items = complete(&source, cursor, &registry);
         assert!(items.iter().any(|i| i.label == "当角色被点击"));
         assert!(!items.iter().any(|i| i.label == "当舞台被点击"));
-        let (source, cursor) = marked("[移|");
+        let (source, cursor) = marked("移|");
         assert!(!complete(&source, cursor, &registry).is_empty());
     }
 
     #[test]
     fn existing_arguments_are_not_replaced() {
         let registry = Registry::new();
-        for marked_source in ["[移动 12|]", "[说 \"保留\" |]", "[移|动 12 步]"] {
+        for marked_source in ["移动 (12)|", "移|动 (12) 步"] {
             let (source, cursor) = marked(marked_source);
             assert!(complete(&source, cursor, &registry).is_empty());
         }
         for marked_source in [
-            "@sprite \"玩家\" { @init { |\"x\": 1 } }",
-            "@sprite \"玩家\" { @init { \"visible\": |true } }",
+            "sprite \"玩家\" :\n    init :\n        |\"x\": 1",
+            "sprite \"玩家\" :\n    init :\n        \"visible\": |true",
         ] {
             let (source, cursor) = marked(marked_source);
             assert!(complete(&source, cursor, &registry).is_empty());
@@ -2038,11 +2869,11 @@ mod tests {
                     global: false,
                 },
                 DataSymbol {
-                    name: "😀 分数".into(),
+                    name: "特殊分数".into(),
                     global: true,
                 },
                 DataSymbol {
-                    name: "a\"b\\c$}".into(),
+                    name: "特殊名称".into(),
                     global: true,
                 },
             ],
@@ -2062,81 +2893,369 @@ mod tests {
             ],
             procedures: Vec::new(),
             parameters: Vec::new(),
+            scopes: None,
+        }
+    }
+
+    #[test]
+    fn bare_names_complete_value_slots_without_replacing_fixed_words() {
+        let mut symbols = data_symbols();
+        symbols.variables.push(super::super::symbols::DataSymbol {
+            name: "设为".into(),
+            global: false,
+        });
+        for (mark, expected) in [
+            ("start:\n    sc|旧 = score+1", "start:\n    score = score+1"),
+            ("移动 (sc|旧) 步", "移动 (score) 步"),
+            ("说 (sc|旧+1)", "说 (score+1)"),
+            (
+                "start:\n    loop sc|旧:\n        pass",
+                "start:\n    loop score:\n        pass",
+            ),
+            (
+                "start:\n    if <sc|旧 < 4>:\n        pass",
+                "start:\n    if <score < 4>:\n        pass",
+            ),
+            (
+                "start:\n    while <sc|旧 < 4>:\n        pass",
+                "start:\n    while <score < 4>:\n        pass",
+            ),
+        ] {
+            let (source, items) = symbol_candidates(mark, &symbols);
+            let selected = items.iter().find(|item| item.label == "score").expect(mark);
+            assert_eq!(apply(&source, selected), expected, "{mark}");
+        }
+        for mark in [
+            "将 (score) 设|为 (12)",
+            "[说 $sc|旧]",
+            "[说 (score + $sc|旧)]",
+        ] {
+            let (_, items) = symbol_candidates(mark, &symbols);
+            assert!(items.is_empty(), "{mark}: {items:?}");
+        }
+        let (source, items) = symbol_candidates("说 (\"保留\") (|)", &symbols);
+        let selected = items.iter().find(|item| item.label == "score").unwrap();
+        assert_eq!(apply(&source, selected), "说 (\"保留\") (score)");
+        let (_, items) = symbol_candidates("start:\n    loop |:\n        pass", &symbols);
+        assert!(items.iter().any(|item| item.label == "score"));
+    }
+
+    #[test]
+    fn assignment_targets_rhs_and_operators_complete_without_replacing_other_text() {
+        let mut symbols = data_symbols();
+        symbols
+            .parameters
+            .push(crate::registry::input("steps", ArgType::Any));
+        for (mark, label, expected) in [
+            ("start:\n    sc|旧 = 10", "score", "start:\n    score = 10"),
+            (
+                "start:\n    # 😀 # 生|旧 += 1",
+                "生命值",
+                "start:\n    # 😀 # 生命值 += 1",
+            ),
+            (
+                "start:\n    global:sc|旧 *= 2",
+                "global:score",
+                "start:\n    global:score *= 2",
+            ),
+            (
+                "start:\n    特殊分|旧 -= 1",
+                "特殊分数",
+                "start:\n    特殊分数 -= 1",
+            ),
+            (
+                "start:\n    global:特殊分|旧 /= 2",
+                "global:特殊分数",
+                "start:\n    global:特殊分数 /= 2",
+            ),
+            (
+                "start:\n    score = 1+sc|旧*2",
+                "score",
+                "start:\n    score = 1+score*2",
+            ),
+            (
+                "start:\n    score = @st|旧 + score",
+                "@steps",
+                "start:\n    score = @steps + score",
+            ),
+            (
+                "start:\n    score = 特殊分|旧",
+                "特殊分数",
+                "start:\n    score = 特殊分数",
+            ),
+        ] {
+            let (source, items) = symbol_candidates(mark, &symbols);
+            let selected = items.iter().find(|item| item.label == label).expect(mark);
+            assert_eq!(apply(&source, selected), expected, "{mark}");
+        }
+        for operator in ["=", "+=", "-=", "*=", "/=", "%="] {
+            for suffix in ["sc|旧", "1 + sc|旧", "|"] {
+                let mark = format!("start:\n    score {operator} {suffix}");
+                let (_, items) = symbol_candidates(&mark, &symbols);
+                assert!(
+                    items.iter().any(|item| item.label == "score"),
+                    "{mark}: {items:?}"
+                );
+            }
+            let (source, items) = symbol_candidates("start:\n    score |", &symbols);
+            let selected = items.iter().find(|item| item.label == operator).unwrap();
+            let applied = apply(&source, selected);
+            assert_eq!(
+                applied,
+                format!(
+                    "start:\n    score {operator} {}",
+                    if operator == "=" { 0 } else { 1 }
+                )
+            );
+        }
+        let (source, items) = symbol_candidates("start:\n    score +|= 4", &symbols);
+        assert_eq!(items.len(), 1);
+        assert_eq!(apply(&source, &items[0]), "start:\n    score += 4");
+        let (_, items) = symbol_candidates("start:\n    |", &symbols);
+        assert!(items.iter().any(|item| item.label == "score"));
+        assert!(
+            !items.iter().any(|item| item.label.starts_with('@')),
+            "{items:?}"
+        );
+        for mark in [
+            "start:\n    lo|gs = 1",
+            "start:\n    logs +|",
+            "start:\n    score = lo|gs",
+            "start:\n    score = global:lo|gs",
+            "start:\n    list:lo|gs = 1",
+            "start:\n    @st|eps = 1",
+            "score = sc|旧",
+            "var sc|旧 = 1",
+            "start:\n    score = \"sc|旧\"",
+            "start:\n    score = 'sc|旧'",
+            "start:\n    score = 1 # sc|旧",
+        ] {
+            let (_, items) = symbol_candidates(mark, &symbols);
+            assert!(items.is_empty(), "{mark}: {items:?}");
+        }
+        assert_eq!(
+            choose("start:\n    score = (x|)", "motion_xposition"),
+            "start:\n    score = (x 坐标)"
+        );
+    }
+
+    #[test]
+    fn variable_write_snippets_are_assignment_statements() {
+        for opcode in ["data_setvariableto", "data_changevariableby"] {
+            let applied = choose("start:\n    |", opcode);
+            assert!(!applied.contains('['), "{applied}");
+            assert!(
+                applied.contains(if opcode == "data_setvariableto" {
+                    "变量 = "
+                } else {
+                    "变量 += "
+                }),
+                "{applied}"
+            );
+            compile_source(&format!("变量 = 0\n{applied}"));
+        }
+        let (source, cursor) = marked("start:\n    [|]");
+        let items = complete(&source, cursor, &Registry::new());
+        assert!(
+            !items
+                .iter()
+                .any(|item| item.detail.as_deref().is_some_and(|detail| {
+                    detail.starts_with("data_setvariableto ·")
+                        || detail.starts_with("data_changevariableby ·")
+                }))
+        );
+    }
+
+    #[test]
+    fn reference_prefixes_in_procedure_fixed_labels_are_preserved() {
+        for prefix in ["var", "list", "global"] {
+            for first in [false, true] {
+                let mut symbols = data_symbols();
+                let header = format!("检查 {}{prefix}: @n", if first { "@first " } else { "" });
+                symbols
+                    .procedures
+                    .push(crate::registry::procedure_template(&header, "check").unwrap());
+                let entered = format!("检查 {}", if first { "(score) " } else { "" });
+                for label in [
+                    format!("{prefix}:|"),
+                    format!("{}|{}:", &prefix[..1], &prefix[1..]),
+                ] {
+                    let mark = format!("{entered}{label} (3)");
+                    let (_, items) = symbol_candidates(&mark, &symbols);
+                    assert!(items.is_empty(), "{mark}: {items:?}");
+                }
+                let mark = format!("{entered}{prefix}: (sc|旧)");
+                let (source, items) = symbol_candidates(&mark, &symbols);
+                let selected = items
+                    .iter()
+                    .find(|item| item.label == "score")
+                    .expect(&mark);
+                let applied = apply(&source, selected);
+                assert_eq!(applied, format!("{entered}{prefix}: (score)"));
+                Registry::new()
+                    .parse(&applied, Shape::Command, &symbols.procedures)
+                    .unwrap();
+            }
         }
     }
 
     #[test]
     fn data_completion_filters_scope_kind_and_preserves_arguments() {
         let symbols = data_symbols();
-        let (source, items) = symbol_candidates("[将 $sc|ore 设为 12]", &symbols);
+        let (source, items) = symbol_candidates("start:\n    sc|ore = 12", &symbols);
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].label, "$score");
+        assert_eq!(items[0].label, "score");
         assert_eq!(items[0].detail.as_deref(), Some("角色变量"));
-        assert_eq!(apply(&source, &items[0]), "[将 $score 设为 12]");
-        let (_, items) = symbol_candidates("[说 $|]", &symbols);
-        for label in ["$score", "$生命值", "$list:logs", "$list:", "$global:"] {
+        assert_eq!(apply(&source, &items[0]), "start:\n    score = 12");
+        let (_, items) = symbol_candidates("说 (|)", &symbols);
+        for label in ["score", "生命值", "global:"] {
             assert!(items.iter().any(|item| item.label == label), "{label}");
         }
-        let (_, items) = symbol_candidates("[说 $list:|]", &symbols);
-        assert_eq!(items.len(), 2);
-        assert!(items.iter().all(|item| item.label.starts_with("$list:")));
-        let (_, items) = symbol_candidates("[说 $global:|]", &symbols);
-        assert!(items.iter().any(|item| item.label == "$global:list:"));
-        assert!(items.iter().any(|item| item.label == "$global:score"));
+        assert!(!items.iter().any(|item| item.label == "logs"));
+        let (_, items) = symbol_candidates("将 (\"x\") 加入 (|)", &symbols);
+        for label in ["logs", "本地记录", "global:"] {
+            assert!(
+                items.iter().any(|item| item.label == label),
+                "{label}: {items:?}"
+            );
+        }
+        assert!(!items.iter().any(|item| item.label == "score"));
+        let (_, items) = symbol_candidates("说 (global:|)", &symbols);
+        assert!(items.iter().any(|item| item.label == "global:score"));
         assert!(
             !items
                 .iter()
                 .any(|item| item.label.contains("生命") || item.label.contains("logs"))
         );
-        let (source, items) = symbol_candidates("[说 $global:list:lo|gs]", &symbols);
+        let (source, items) = symbol_candidates("将 (\"x\") 加入 (global:lo|gs)", &symbols);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].detail.as_deref(), Some("全局列表"));
-        assert_eq!(apply(&source, &items[0]), "[说 $global:list:logs]");
-        let (_, items) = symbol_candidates("[说 $lo|]", &symbols);
-        assert_eq!(items[0].label, "$list:logs");
-        assert_eq!(items[0].filter_text.as_deref(), Some("$logs"));
-        let (source, items) = symbol_candidates("[说 $glob|al:score]", &symbols);
-        let prefix = items.iter().find(|item| item.label == "$global:").unwrap();
-        assert_eq!(apply(&source, prefix), "[说 $global:score]");
+        assert_eq!(apply(&source, &items[0]), "将 (\"x\") 加入 (global:logs)");
+        let (source, items) = symbol_candidates("删除 (lo|旧) 的全部项目", &symbols);
+        assert_eq!(items[0].label, "logs");
+        assert_eq!(items[0].filter_text.as_deref(), Some("logs"));
+        assert_eq!(apply(&source, &items[0]), "删除 (logs) 的全部项目");
+        let (source, items) = symbol_candidates("说 (glob|al:score)", &symbols);
+        let prefix = items.iter().find(|item| item.label == "global:").unwrap();
+        assert_eq!(apply(&source, prefix), "说 (global:score)");
+        for mark in [
+            "说 var:|",
+            "说 list:|",
+            "说 global:list:|",
+            "将 (\"x\") 加入 list:lo|",
+        ] {
+            let (_, items) = symbol_candidates(mark, &symbols);
+            assert!(items.is_empty(), "{mark}: {items:?}");
+        }
     }
 
     #[test]
-    fn reference_completion_replaces_quoted_suffix_with_utf16_positions() {
+    fn completion_uses_declared_data_kinds_and_surrounding_reporter_slots() {
         let symbols = data_symbols();
-        for marked_source in ["[说 $\"😀 |旧后缀\"]", "[说 $\"😀 |]", "[说 $\"😀 |\"]"]
-        {
-            let (source, items) = symbol_candidates(marked_source, &symbols);
-            assert_eq!(items.len(), 1, "{marked_source}");
-            assert_eq!(apply(&source, &items[0]), "[说 $\"😀 分数\"]");
+        for (mark, present, absent) in [
+            ("((lo|旧) 的项目数)", "logs", "score"),
+            ("((sc|旧) 的项目数)", "", "score"),
+            ("(lo|旧 + (1))", "", "logs"),
+            ("将 (\"x\") 加入 (lo|旧)", "logs", "score"),
+            ("删除 (lo|旧) 的全部项目", "logs", "score"),
+            ("显示变量 (sc|旧)", "score", "logs"),
+            ("说 (lo|旧)", "", "logs"),
+            ("start:\n    score = lo|旧", "", "logs"),
+            ("start:\n    score = ((lo|旧) 的项目数)", "logs", "score"),
+        ] {
+            let (_, items) = symbol_candidates(mark, &symbols);
+            if !present.is_empty() {
+                assert!(
+                    items.iter().any(|item| item.label == present),
+                    "{mark}: {items:?}"
+                );
+            }
+            assert!(
+                !items.iter().any(|item| item.label == absent),
+                "{mark}: {items:?}"
+            );
         }
-        let (source, items) = symbol_candidates("# 😀 # [说 $生|命旧]", &symbols);
-        assert_eq!(apply(&source, &items[0]), "# 😀 # [说 $生命值]");
-        let (source, items) = symbol_candidates("<$\"sc|旧\"<1>", &symbols);
-        assert_eq!(apply(&source, &items[0]), "<$\"score\"<1>");
-        let (source, items) = symbol_candidates(r#"[说 $"a\"b|old"]"#, &symbols);
-        assert_eq!(items.len(), 1);
-        let applied = apply(&source, &items[0]);
-        assert_eq!(applied, r#"[说 $"a\"b\\c$}"]"#);
-        Registry::new()
-            .parse(&applied, Shape::Command, &[])
-            .unwrap();
-        let (source, items) = symbol_candidates(r#"[说 $"a\"|old"]"#, &symbols);
-        assert_eq!(items.len(), 1);
-        assert_eq!(apply(&source, &items[0]), r#"[说 $"a\"b\\c$}"]"#);
-        let (source, items) = symbol_candidates("[测试 $\"sc| \"后续参数\"]", &symbols);
-        assert_eq!(items.len(), 1);
-        assert_eq!(apply(&source, &items[0]), "[测试 $\"score\" \"后续参数\"]");
+    }
+
+    #[test]
+    fn explicit_extension_inputs_filter_data_candidates_by_slot_kind() {
+        let symbols = data_symbols();
+        let mut registry = Registry::new();
+        registry.templates.push(Template {
+            opcode: "custom_append".into(),
+            shape: Shape::Command,
+            namespace: Some("ext".into()),
+            extension_id: Some("custom".into()),
+            local_opcode: Some("append".into()),
+            tokens: crate::registry::tokens_from_text(
+                "更新 [VALUE] 到 [LIST]",
+                &[
+                    crate::registry::input("VALUE", ArgType::Any),
+                    crate::registry::input("LIST", ArgType::List),
+                ],
+            )
+            .unwrap(),
+            sprite_only: false,
+            stage_only: false,
+            procedure: None,
+            warp: false,
+            branch_count: 0,
+        });
+        for (mark, expected, absent) in [
+            (r#"ext::"append"(("x"), (|))"#, "logs", "score"),
+            (r#"ext::"append"(("x"), (lo|旧))"#, "logs", "score"),
+            (r#"ext::"append"((|), (logs))"#, "score", "logs"),
+            (r#"ext.更新 ("x") 到 (lo|旧)"#, "logs", "score"),
+        ] {
+            let (source, cursor) = marked(mark);
+            let items = complete_with_symbols(&source, cursor, &registry, &symbols);
+            assert!(
+                items.iter().any(|item| item.label == expected),
+                "{mark}: {items:?}"
+            );
+            assert!(
+                !items.iter().any(|item| item.label == absent),
+                "{mark}: {items:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_reference_edits_preserve_utf16_and_reject_quoted_data_names() {
+        let symbols = data_symbols();
+        for (mark, expected) in [
+            ("# 😀 # 说(生|命旧)", "# 😀 # 说(生命值)"),
+            ("# 😀 # 说(特殊分|旧)", "# 😀 # 说(特殊分数)"),
+            (
+                "# 😀 # 删除(本|旧)的全部项目",
+                "# 😀 # 删除(本地记录)的全部项目",
+            ),
+        ] {
+            let (source, items) = symbol_candidates(mark, &symbols);
+            assert_eq!(items.len(), 1, "{mark}");
+            assert_eq!(apply(&source, &items[0]), expected);
+        }
+        for mark in [
+            "说 var:(\"sc|旧\")",
+            "说 global:(\"sc|旧\")",
+            "说 list:(\"lo|旧\")",
+            "start:\n    var:\"sc|旧\" = 1",
+            "说 (\"sc|旧\")",
+        ] {
+            let (_, items) = symbol_candidates(mark, &symbols);
+            assert!(items.is_empty(), "{mark}: {items:?}");
+        }
     }
 
     #[test]
     fn data_completion_works_in_nested_values_but_not_literals_or_declarations() {
         let symbols = data_symbols();
         for (marked_source, expected) in [
-            ("[移动 ($sc|ore + 1) 步]", "[移动 ($score + 1) 步]"),
-            ("<8 > ($sc|ore / 2)>", "<8 > ($score / 2)>"),
+            ("移动(sc|ore + 1)步", "移动(score + 1)步"),
+            ("<8 > (sc|ore / 2)>", "<8 > (score / 2)>"),
             (
-                "@sprite \"玩家\" { @init {}\n 当绿旗被点击 { 如果 <$sc|ore < 2> 那么 {} } }",
-                "@sprite \"玩家\" { @init {}\n 当绿旗被点击 { 如果 <$score < 2> 那么 {} } }",
+                "sprite \"玩家\" :\n    init :\n        pass\n    start :\n        if <sc|ore < 2> :\n            pass",
+                "sprite \"玩家\" :\n    init :\n        pass\n    start :\n        if <score < 2> :\n            pass",
             ),
         ] {
             let (source, items) = symbol_candidates(marked_source, &symbols);
@@ -2144,20 +3263,20 @@ mod tests {
             assert_eq!(apply(&source, &items[0]), expected);
         }
         for marked_source in [
-            "[说 \"$sc|\"]",
-            "[移到 /'$sc|'/]",
-            "[说 (8 /'$sc|'/)]",
-            "[说 (8 /'\"$sc|\"'/)]",
-            r"[移到 /'a\'/$sc|'/]",
-            r"[移到 /'a\\/$sc|'/]",
-            "[移到 /'unfinished/$sc|",
-            "# 注释 $sc|",
-            "#\n $sc|\n#",
-            "@sprite \"玩家\" { @init { \"x\": \"$sc|\" } }",
-            "@list names = [$sc|]",
-            "定义自制积木 $sc| {}",
-            "定义自制积木 示例 <@sc|> {}",
-            "import helpers.$sc|",
+            "说 (\"sc|\")",
+            "移到 ('sc|')",
+            "说 ((8) 'sc|')",
+            "说 ((8) '\"sc|\"')",
+            r"移到 ('a\'/sc|')",
+            r"移到 ('a\\/sc|')",
+            "移到 ('unfinished/sc|",
+            "# 注释 sc|",
+            "#\n sc|\n#",
+            "sprite \"玩家\" :\n    init :\n        \"x\": \"sc|\"",
+            "list names = {sc|}",
+            "def sc| :\n    pass",
+            "def 示例 <@sc|> :\n    pass",
+            "import helpers.sc|",
         ] {
             let (_, items) = symbol_candidates(marked_source, &symbols);
             assert!(items.is_empty(), "{marked_source}");
@@ -2167,14 +3286,36 @@ mod tests {
     #[test]
     fn data_references_complete_in_hat_arguments_before_script_bodies() {
         let symbols = data_symbols();
+        let mut registry = Registry::new();
+        registry.templates.push(Template {
+            opcode: "custom_when_number".into(),
+            shape: Shape::Hat,
+            namespace: Some("ext".into()),
+            extension_id: Some("custom".into()),
+            local_opcode: Some("when_number".into()),
+            tokens: crate::registry::tokens_from_text(
+                "当数值 [VALUE] 达标",
+                &[crate::registry::input("VALUE", ArgType::Any)],
+            )
+            .unwrap(),
+            sprite_only: false,
+            stage_only: false,
+            procedure: None,
+            warp: false,
+            branch_count: 0,
+        });
         for (marked_source, expected) in [
-            ("ext.当数值 $sc|ore 达标 {}", "ext.当数值 $score 达标 {}"),
             (
-                "@sprite \"玩家\" { @init {}\n ext.当数值 $sc|ore 达标 {} }",
-                "@sprite \"玩家\" { @init {}\n ext.当数值 $score 达标 {} }",
+                "ext.当数值 (sc|ore) 达标:\n    pass",
+                "ext.当数值 (score) 达标:\n    pass",
+            ),
+            (
+                "sprite \"玩家\" :\n    init :\n        pass\n    ext.当数值 (sc|ore) 达标 :\n        pass",
+                "sprite \"玩家\" :\n    init :\n        pass\n    ext.当数值 (score) 达标 :\n        pass",
             ),
         ] {
-            let (source, items) = symbol_candidates(marked_source, &symbols);
+            let (source, cursor) = marked(marked_source);
+            let items = complete_with_symbols(&source, cursor, &registry, &symbols);
             assert_eq!(items.len(), 1);
             assert_eq!(apply(&source, &items[0]), expected);
         }
@@ -2188,28 +3329,28 @@ mod tests {
             crate::registry::input("enabled", ArgType::Boolean),
         ];
         for (marked_source, expected) in [
-            (r#"ext::"send".[$sc|]"#, r#"ext::"send".[$score]"#),
-            (r#"ext::"read".($sc|, 1)"#, r#"ext::"read".($score, 1)"#),
-            (r#"ext::"test".<$sc|, 1>"#, r#"ext::"test".<$score, 1>"#),
+            (r#"ext::"send"((sc|))"#, r#"ext::"send"((score))"#),
             (
-                r#"ext::"event".hat($sc|) {}"#,
-                r#"ext::"event".hat($score) {}"#,
+                r#"(ext::"read"((sc|), (1)))"#,
+                r#"(ext::"read"((score), (1)))"#,
             ),
             (
-                r#""自定义拓展"::"send".[$sc|, "保留"]"#,
-                r#""自定义拓展"::"send".[$score, "保留"]"#,
+                r#"<ext::"test"((sc|), (1))>"#,
+                r#"<ext::"test"((score), (1))>"#,
             ),
-            (r#"ext::"send".[@sec|]"#, r#"ext::"send".[@seconds]"#),
-            (r#"ext::"read".(@sec|)"#, r#"ext::"read".(@seconds)"#),
-            (r#"ext::"test".<@sec|>"#, r#"ext::"test".<@seconds>"#),
+            (r#"ext::"event"((sc|)):"#, r#"ext::"event"((score)):"#),
             (
-                r#"ext::"event".hat(@sec|) {}"#,
-                r#"ext::"event".hat(@seconds) {}"#,
+                r#""自定义拓展"::"send"((sc|), ("保留"))"#,
+                r#""自定义拓展"::"send"((score), ("保留"))"#,
             ),
-            (r#"ext::"test".<@en|>"#, r#"ext::"test".<<@enabled>>"#),
+            (r#"ext::"send"((@sec|))"#, r#"ext::"send"((@seconds))"#),
+            (r#"(ext::"read"((@sec|)))"#, r#"(ext::"read"((@seconds)))"#),
+            (r#"<ext::"test"((@sec|))>"#, r#"<ext::"test"((@seconds))>"#),
+            (r#"ext::"event"((@sec|)):"#, r#"ext::"event"((@seconds)):"#),
+            (r#"<ext::"test"(<@en|>)>"#, r#"<ext::"test"(<@enabled>)>"#),
             (
-                r#"ext::"send".[(ext::"read".($sc|) + 1)]"#,
-                r#"ext::"send".[(ext::"read".($score) + 1)]"#,
+                r#"ext::"send"(((ext::"read"((sc|))) + (1)))"#,
+                r#"ext::"send"(((ext::"read"((score))) + (1)))"#,
             ),
         ] {
             let (source, items) = symbol_candidates(marked_source, &symbols);
@@ -2217,47 +3358,56 @@ mod tests {
             assert_eq!(apply(&source, &items[0]), expected, "{marked_source}");
         }
         for marked_source in [
-            r#"ext::"send".[|]"#,
-            r#"ext::"read".(|)"#,
-            r#"ext::"test".<|>"#,
-            r#"ext::"event".hat(|) {}"#,
+            r#"ext::"send"((|))"#,
+            r#"(ext::"read"((|)))"#,
+            r#"<ext::"test"((|))>"#,
+            r#"ext::"event"((|)):"#,
         ] {
             let (_, items) = symbol_candidates(marked_source, &symbols);
-            assert!(items.is_empty(), "{marked_source}");
+            assert!(
+                items.iter().any(|item| item.label == "score"),
+                "{marked_source}"
+            );
         }
-        let (source, cursor) = marked(r#"ext::"read".((x|))"#);
+        let (source, cursor) = marked(r#"(ext::"read"((x|)))"#);
         let items = complete_with_symbols(&source, cursor, &Registry::new(), &symbols);
-        assert!(items.iter().any(|item| item.label == "(x 坐标)"));
+        assert!(items.iter().any(|item| item.label == "x 坐标"));
     }
 
     #[test]
     fn quoted_reference_edits_preserve_adjacent_atoms() {
-        let symbols = data_symbols();
+        let mut symbols = data_symbols();
+        symbols
+            .parameters
+            .push(crate::registry::input("name with spaces", ArgType::Any));
         for next in [
             r#""x""#,
             r#"(x 坐标)"#,
             r#"<1 < 2>"#,
-            r#"$生命值"#,
-            r#"$"😀 分数""#,
+            r#"生命值"#,
+            "特殊分数",
             "@seconds",
             "12",
             "-3",
-            r#"ext.(读取值)"#,
-            r#"ext::"read".(1)"#,
-            r#""自定义拓展".<有效?>"#,
+            r#"(ext.读取值)"#,
+            r#"(ext::"read"((1)))"#,
+            r#"<"自定义拓展".有效?>"#,
         ] {
-            let marked_source = format!(r#"[示例 $"sc|"{next}]"#);
+            let marked_source = format!(r#"示例(@"na|")({next})"#);
             let (source, items) = symbol_candidates(&marked_source, &symbols);
             assert_eq!(items.len(), 1, "{marked_source}");
             assert_eq!(
                 apply(&source, &items[0]),
-                format!(r#"[示例 $"score"{next}]"#),
+                format!(r#"示例(@"name with spaces")({next})"#),
                 "{marked_source}",
             );
         }
-        let (source, items) = symbol_candidates(r#"[测试 $"sc| "后续参数"]"#, &symbols);
+        let (source, items) = symbol_candidates(r#"测试(@"na|) "后续参数""#, &symbols);
         assert_eq!(items.len(), 1);
-        assert_eq!(apply(&source, &items[0]), r#"[测试 $"score" "后续参数"]"#);
+        assert_eq!(
+            apply(&source, &items[0]),
+            r#"测试(@"name with spaces") "后续参数""#
+        );
     }
 
     #[test]
@@ -2269,21 +3419,21 @@ mod tests {
             crate::registry::input("😀 名字", ArgType::Any),
         ];
         for (marked_source, label, expected) in [
-            ("[移动 @步|旧 步]", "@步数", "[移动 @步数 步]"),
-            ("[说 @是|]", "<@是否继续>", "[说 <@是否继续>]"),
+            ("移动(@步|旧)步", "@步数", "移动(@步数)步"),
+            ("说(@是|)", "<@是否继续>", "说(<@是否继续>)"),
             ("<@是|>", "<@是否继续>", "<@是否继续>"),
             ("<@是|", "<@是否继续>", "<@是否继续>"),
             ("<@步|旧 < 10>", "@步数", "<@步数 < 10>"),
             ("<@步|旧 > 10>", "@步数", "<@步数 > 10>"),
             ("<@步|旧>10>", "@步数", "<@步数>10>"),
-            ("<@步|旧 > $>", "@步数", "<@步数 > $>"),
+            ("<@步|旧 > sc>", "@步数", "<@步数 > sc>"),
             ("<@步|旧\n>\n10>", "@步数", "<@步数\n>\n10>"),
             ("<@是|旧 > 10>", "<@是否继续>", "<<@是否继续> > 10>"),
-            ("<@是|旧 > $>", "<@是否继续>", "<<@是否继续> > $>"),
+            ("<@是|旧 > sc>", "<@是否继续>", "<<@是否继续> > sc>"),
             ("<<@是|旧> > 10>", "<@是否继续>", "<<@是否继续> > 10>"),
             ("<<@是|旧>>10>", "<@是否继续>", "<<@是否继续>>10>"),
             ("<@\"😀 |旧\">10>", "@\"😀 名字\"", "<@\"😀 名字\">10>"),
-            ("[说 @\"😀 |旧\"]", "@\"😀 名字\"", "[说 @\"😀 名字\"]"),
+            ("说(@\"😀 |旧\")", "@\"😀 名字\"", "说(@\"😀 名字\")"),
         ] {
             let (source, items) = symbol_candidates(marked_source, &symbols);
             let selected = items
@@ -2306,7 +3456,7 @@ mod tests {
         .unwrap();
         let mut symbols = data_symbols();
         symbols.procedures.push(procedure.clone());
-        let (source, items) = symbol_candidates("[测|]", &symbols);
+        let (source, items) = symbol_candidates("测|", &symbols);
         let selected = items
             .iter()
             .find(|item| {
@@ -2320,10 +3470,24 @@ mod tests {
             .parse(&text, Shape::Command, &symbols.procedures)
             .unwrap();
         assert_eq!(call.template.procedure, procedure.procedure);
-        assert!(text.contains("条件: <>"));
+        assert!(text.contains("条件:<>"));
         compile_source(&format!(
-            "定义自制积木 测试 步数: @steps 条件: <@enabled> 内容: @text {{ [等待 @steps 秒] }}\n当绿旗被点击 {{ {text} }}"
+            "def 测试 步数: @steps 条件: <@enabled> 内容: @text :\n    等待 (@steps) 秒\nstart :\n    {text}"
         ));
+    }
+
+    #[test]
+    fn parameter_first_procedures_complete_at_statement_and_input_positions() {
+        let mut symbols = data_symbols();
+        let procedure =
+            crate::registry::procedure_template("@steps 步", "parameter_first").unwrap();
+        symbols.procedures.push(procedure);
+        let (source, items) = symbol_candidates("start:\n    |", &symbols);
+        let selected = items.iter().find(|item| item.label == "(\"\")步").unwrap();
+        assert_eq!(apply(&source, selected), "start:\n    (\"\")步");
+        let (source, items) = symbol_candidates("start:\n    (sco|旧)步", &symbols);
+        let selected = items.iter().find(|item| item.label == "score").unwrap();
+        assert_eq!(apply(&source, selected), "start:\n    (score)步");
     }
 
     #[test]
@@ -2333,14 +3497,19 @@ mod tests {
         symbols
             .procedures
             .push(crate::registry::procedure_template("移动 @steps 步", "movement").unwrap());
-        let (_, items) = symbol_candidates("[移|]", &symbols);
-        assert!(!items.iter().any(|item| item.label.starts_with("[移动 ")));
+        let (_, items) = symbol_candidates("移|", &symbols);
+        assert!(!items.iter().any(|item| item.label.starts_with("移动(")));
         for template in registry.templates.iter().chain(symbols.procedures.iter()) {
             if let Some((label, _)) =
                 completion_text_visible(template, &registry, &symbols.procedures)
             {
                 let call = registry
-                    .parse(&label, template.shape, &symbols.procedures)
+                    .parse_typed(
+                        &label,
+                        template.shape,
+                        &symbols.procedures,
+                        &template_default_types(template),
+                    )
                     .unwrap();
                 assert_eq!(call.template.opcode, template.opcode);
                 assert_eq!(call.template.procedure, template.procedure);
@@ -2351,15 +3520,13 @@ mod tests {
     #[test]
     fn document_wrapper_collects_declarations_even_with_incomplete_calls() {
         let registry = Registry::new();
-        let (source, cursor) = marked(
-            "@var score = 0\n定义自制积木 等一等 @seconds { [等待 @sec| 秒] }\n当绿旗被点击 { [等一] }",
-        );
+        let (source, cursor) =
+            marked("score = 0\ndef 等一等 @seconds :\n    等待 (@sec|) 秒\nstart :\n    等一");
         let items = complete(&source, cursor, &registry);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "@seconds");
-        let (source, cursor) = marked(
-            "@var score = 0\n定义自制积木 等一等 @seconds { [等待 @seconds 秒] }\n当绿旗被点击 { [等一|] }",
-        );
+        let (source, cursor) =
+            marked("score = 0\ndef 等一等 @seconds :\n    等待 (@seconds) 秒\nstart :\n    等一|");
         let items = complete(&source, cursor, &registry);
         assert_eq!(items.len(), 1);
         let applied = apply(&source, &items[0]);

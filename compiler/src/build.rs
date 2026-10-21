@@ -7,6 +7,7 @@ use crate::{
 use base64::Engine;
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     fs,
     io::{Cursor, Write},
     path::Path,
@@ -18,12 +19,11 @@ pub fn compile(config: &BuildConfig) -> Result<GeneratedProject> {
     let project = crate::project::load(&config.entry, &config.src_dir)?;
     let analysis = crate::analysis::bind::bind_project(&project, &registry)?;
     let mut generated = crate::codegen::generate_bound(&analysis)?;
-    let mut targets = generated.json["targets"]
+    let targets = generated.json["targets"]
         .as_array_mut()
-        .ok_or_else(|| Error::new("内部错误：缺少 targets"))?
-        .clone();
+        .expect("codegen always produces a targets array");
     for (index, target) in targets.iter_mut().enumerate() {
-        let is_stage = target["isStage"] == true;
+        let is_stage = index == 0;
         let source = if is_stage {
             &project.stage
         } else {
@@ -45,13 +45,12 @@ pub fn compile(config: &BuildConfig) -> Result<GeneratedProject> {
             properties.map(|p| &p.sounds[..]).unwrap_or(&[])
         };
         target["costumes"] = Value::Array(
-            costume_assets(costumes, &config.base_dir, is_stage, &mut generated)
+            costume_assets(costumes, &config.base_dir, is_stage, &mut generated.assets)
                 .map_err(at_source)?,
         );
         target["sounds"] = Value::Array(
-            sound_assets(sounds, &config.base_dir, &mut generated).map_err(at_source)?,
+            sound_assets(sounds, &config.base_dir, &mut generated.assets).map_err(at_source)?,
         );
-        target["currentCostume"] = json!(0);
         if !is_stage {
             if let Some(p) = properties {
                 for (key, value) in [
@@ -92,13 +91,9 @@ pub fn compile(config: &BuildConfig) -> Result<GeneratedProject> {
             if !options.as_object().unwrap().is_empty() {
                 settings["runtimeOptions"] = options;
             }
-            if target.get("comments").and_then(Value::as_object).is_none() {
-                target["comments"] = json!({});
-            }
             target["comments"]["sbdsl_runtime"] = json!({"blockId":null,"x":0,"y":0,"width":350,"height":200,"minimized":true,"text":format!("ScratchDSL TurboWarp settings\n{} // _twconfig_",settings)});
         }
     }
-    generated.json["targets"] = Value::Array(targets);
     generated.json["extensions"] = json!(registry.extension_sources.keys().collect::<Vec<_>>());
     let urls = registry
         .extension_sources
@@ -153,10 +148,14 @@ fn asset_data(asset: &Asset, base: &Path) -> Result<(Vec<u8>, String)> {
     Ok((bytes, ext))
 }
 
-fn pack_asset(bytes: Vec<u8>, ext: &str, generated: &mut GeneratedProject) -> (String, String) {
+fn pack_asset(
+    bytes: Vec<u8>,
+    ext: &str,
+    packed: &mut BTreeMap<String, Vec<u8>>,
+) -> (String, String) {
     let hash = format!("{:x}", md5::compute(&bytes));
     let name = format!("{hash}.{ext}");
-    generated.assets.insert(name.clone(), bytes);
+    packed.insert(name.clone(), bytes);
     (hash, name)
 }
 
@@ -164,14 +163,14 @@ fn costume_assets(
     assets: &[Asset],
     base: &Path,
     stage: bool,
-    generated: &mut GeneratedProject,
+    packed: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<Vec<Value>> {
     if assets.is_empty() {
         let (w, h) = if stage { (480, 360) } else { (1, 1) };
         let svg = format!(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\"></svg>"
         );
-        let (hash, md5ext) = pack_asset(svg.into_bytes(), "svg", generated);
+        let (hash, md5ext) = pack_asset(svg.into_bytes(), "svg", packed);
         return Ok(vec![
             json!({"name":"空白","assetId":hash,"md5ext":md5ext,"dataFormat":"svg","bitmapResolution":1,"rotationCenterX":w as f64/2.,"rotationCenterY":h as f64/2.}),
         ]);
@@ -191,7 +190,7 @@ fn costume_assets(
         };
         let resolution = asset.bitmap_resolution.unwrap_or(1);
         if resolution == 0 {return Err(Error::new("bitmapResolution 不能为 0"));}
-        let (hash,md5ext) = pack_asset(bytes,&ext,generated);
+        let (hash,md5ext) = pack_asset(bytes,&ext,packed);
         Ok(json!({"name":asset.name,"assetId":hash,"md5ext":md5ext,"dataFormat":ext,"bitmapResolution":resolution,
             "rotationCenterX":asset.rotation_center_x.unwrap_or(w/2.),"rotationCenterY":asset.rotation_center_y.unwrap_or(h/2.)}))
     }).collect()
@@ -236,7 +235,7 @@ fn svg_dimensions(bytes: &[u8]) -> Result<(f64, f64)> {
 fn sound_assets(
     assets: &[Asset],
     base: &Path,
-    generated: &mut GeneratedProject,
+    packed: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<Vec<Value>> {
     use symphonia::core::{
         codecs::DecoderOptions,
@@ -268,7 +267,7 @@ fn sound_assets(
             }
         }
         if rate == 0 || frames == 0 {return Err(Error::new("音频为空或无法确定采样率"));}
-        let (hash,md5ext) = pack_asset(bytes,&ext,generated);
+        let (hash,md5ext) = pack_asset(bytes,&ext,packed);
         Ok(json!({"name":asset.name,"assetId":hash,"md5ext":md5ext,"dataFormat":ext,"format":"","rate":rate,"sampleCount":frames}))
     }).collect()
 }

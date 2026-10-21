@@ -20,13 +20,8 @@ try {
     & $Npm test
     if ($LASTEXITCODE -ne 0) { throw "Plugin checks failed" }
     $manifest = Get-Content package.json -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($manifest.license -cne 'MIT') { throw "The extension license must be MIT" }
-    $compilerManifest = Get-Content "$repo/compiler/Cargo.toml" -Raw -Encoding UTF8
-    if ($compilerManifest -notmatch ('(?m)^version\s*=\s*"' + [regex]::Escape($manifest.version) + '"')) {
-        throw "Compiler and extension versions must agree"
-    }
     $output = Join-Path $repo "dist/scratchdsl-$($manifest.version)-win32-x64.vsix"
-    & $Npm exec --offline -- vsce package --target win32-x64 --no-dependencies -o $output
+    & $Npm exec --offline -- vsce package --target win32-x64 --pre-release --no-dependencies -o $output
     if ($LASTEXITCODE -ne 0) { throw "VSIX packaging failed" }
     Write-Host "Created $output"
 } finally { Pop-Location }

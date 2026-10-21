@@ -15,7 +15,7 @@ pub(crate) const RESERVED_OPCODES: &[&str] = &[
     "control_get_counter",
     "control_if_else",
     "control_incr_counter",
-    "control_while",
+    "control_repeat_until",
     "data_hidelist",
     "data_listcontents",
     "data_showlist",
@@ -143,6 +143,11 @@ pub fn templates() -> Vec<Template> {
     let mut add = |opcode: &str, shape, text: &str, slots: Vec<Slot>, sprite_only| {
         all.push(Template {
             opcode: opcode.into(),
+            branch_count: if shape == Control {
+                if opcode == "control_if_else" { 2 } else { 1 }
+            } else {
+                0
+            },
             shape,
             namespace: None,
             extension_id: None,
@@ -321,7 +326,7 @@ pub fn templates() -> Vec<Template> {
             .chain('0'..='9')
             .map(|c| (c.to_string(), c.to_string())),
     );
-    add("event_whenflagclicked", Hat, "当绿旗被点击", vec![], false);
+    add("event_whenflagclicked", Hat, "start", vec![], false);
     add(
         "event_whenthisspriteclicked",
         Hat,
@@ -417,32 +422,27 @@ pub fn templates() -> Vec<Template> {
     add(
         "control_repeat",
         Control,
-        "重复执行 [TIMES] 次",
+        "loop [TIMES]",
         vec![num("TIMES")],
         false,
     );
+    add("control_forever", Control, "while true", vec![], false);
     add(
-        "control_repeat",
+        "control_while",
         Control,
-        "循环 [TIMES] 次",
-        vec![num("TIMES")],
-        false,
-    );
-    add("control_forever", Control, "重复执行", vec![], false);
-    add(
-        "control_repeat_until",
-        Control,
-        "重复执行直到 [CONDITION]",
+        "while [CONDITION]",
         vec![boolean("CONDITION")],
         false,
     );
-    add(
-        "control_if",
-        Control,
-        "如果 [CONDITION] 那么",
-        vec![boolean("CONDITION")],
-        false,
-    );
+    for keyword in ["if", "elif"] {
+        add(
+            "control_if",
+            Control,
+            &format!("{keyword} [CONDITION]"),
+            vec![boolean("CONDITION")],
+            false,
+        );
+    }
     add(
         "sensing_touchingobject",
         Boolean,
@@ -502,7 +502,7 @@ pub fn templates() -> Vec<Template> {
         ("operator_subtract", "[NUM1] - [NUM2]"),
         ("operator_multiply", "[NUM1] * [NUM2]"),
         ("operator_divide", "[NUM1] / [NUM2]"),
-        ("operator_mod", "[NUM1] mod [NUM2]"),
+        ("operator_mod", "[NUM1] % [NUM2]"),
         ("operator_mod", "[NUM1] 除以 [NUM2] 的余数"),
     ] {
         add(op, Reporter, text, vec![num("NUM1"), num("NUM2")], false);
@@ -608,14 +608,14 @@ pub fn templates() -> Vec<Template> {
     add(
         "data_setvariableto",
         Command,
-        "将 [VARIABLE] 设为 [VALUE]",
+        "[VARIABLE] = [VALUE]",
         vec![variable(), any("VALUE")],
         false,
     );
     add(
         "data_changevariableby",
         Command,
-        "将 [VARIABLE] 增加 [VALUE]",
+        "[VARIABLE] += [VALUE]",
         vec![variable(), num("VALUE")],
         false,
     );

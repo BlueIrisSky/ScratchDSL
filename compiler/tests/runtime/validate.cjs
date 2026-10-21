@@ -1,5 +1,5 @@
 /* Development-only integration check against an unmodified TurboWarp VM checkout.
- * Usage: node compiler/tests/runtime/validate.cjs <scratch-vm-directory> [hello.sb3] [extensions.sb3] [procedures.sb3] [demo.sb3]
+ * Usage: node compiler/tests/runtime/validate.cjs <scratch-vm-directory> [hello.sb3] [extensions.sb3] [procedures.sb3] [demo.sb3] [--controls=controls.sb3]
  * The Rust compiler and its installed executable do not depend on Node.
  */
 'use strict';
@@ -11,12 +11,15 @@ const crypto = require('node:crypto');
 const nodeVM = require('node:vm');
 const {createRequire} = require('node:module');
 
-const vmDirectory = path.resolve(process.argv[2] || 'target/validation/scratch-vm');
+const arguments_ = process.argv.slice(2);
+const controlsArgument = arguments_.find(argument => argument.startsWith('--controls='));
+const positional = arguments_.filter(argument => !argument.startsWith('--controls='));
+const vmDirectory = path.resolve(positional[0] || 'target/validation/scratch-vm');
 const upstreamRequire = createRequire(path.join(vmDirectory, 'package.json'));
 const VirtualMachine = upstreamRequire('./src/index.js');
 const JSZip = upstreamRequire('@turbowarp/jszip');
-const hello = path.resolve(process.argv[3] || 'examples/hello/dist/hello.sb3');
-const extensions = path.resolve(process.argv[4] || 'examples/extensions/dist/extensions.sb3');
+const hello = path.resolve(positional[1] || 'examples/hello/dist/hello.sb3');
+const extensions = path.resolve(positional[2] || 'examples/extensions/dist/extensions.sb3');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -28,6 +31,28 @@ function opcodeCounts(target) {
         counts[block.opcode] = (counts[block.opcode] || 0) + 1;
     }
     return counts;
+}
+
+function branchGraphs(target) {
+    const blocks = target.blocks;
+    const branches = block => Object.entries(block.inputs || {})
+        .filter(([name]) => /^SUBSTACK(?:[2-9]|[1-9]\d+)?$/.test(name))
+        .map(([name, input]) => [name, stack(input[1])]);
+    const stack = first => {
+        const result = [];
+        const seen = new Set();
+        for (let id = first; id; id = blocks[id].next) {
+            assert(!seen.has(id), 'cycle in substack');
+            seen.add(id);
+            assert(blocks[id], `missing substack block ${id}`);
+            result.push({opcode: blocks[id].opcode, branches: branches(blocks[id])});
+        }
+        return result;
+    };
+    return Object.values(blocks)
+        .filter(block => block && !Array.isArray(block) && branches(block).length)
+        .map(block => JSON.stringify({opcode: block.opcode, branches: branches(block)}))
+        .sort();
 }
 
 async function readProject(filename) {
@@ -108,6 +133,14 @@ async function validate(filename, kind) {
             const mode = Object.values(serialized.targets[1].blocks).find(block => block.opcode === 'custom_mode');
             assert.equal(mode.fields.MODE[0], 'fast');
         }
+        if (kind === 'controls') {
+            assert.equal(serialized.extensionURLs.flow, project.extensionURLs.flow);
+            for (let i = 0; i < project.targets.length; i++) {
+                // The VM may remap block IDs when loading a project.
+                assert.deepEqual(branchGraphs(serialized.targets[i]), branchGraphs(project.targets[i]),
+                    `${kind}: substack connections changed during serialization`);
+            }
+        }
         vm.start();
         vm.greenFlag();
         const deadline = Date.now() + 6000;
@@ -129,6 +162,20 @@ async function validate(filename, kind) {
             assert.equal(score.value, 20);
             assert.equal(sprite.x, 100);
             assert(spoken.includes('编译成功！已经走了 20 步。'));
+        } else if (kind === 'controls') {
+            const values = Object.fromEntries(Object.values(stage.variables)
+                .map(variable => [variable.name, variable.value]));
+            assert.equal(values.loops, 3);
+            assert.equal(values.second, 3);
+            assert.equal(values.third, 42);
+            assert.equal(values.after, 6);
+            assert.deepEqual(values.log, ['third']);
+            const flow = instances.get('flow');
+            assert.equal(Number(flow.other), 9);
+            assert.deepEqual(
+                [Number(flow.picked[0]), flow.picked[1], Number(flow.picked[2]), flow.picked[3]],
+                [3, 'B', 42, 'tail']);
+            assert.equal(Number(flow.onceValue), 5);
         } else {
             const globalScore = Object.values(stage.variables).find(variable => variable.name === 'score');
             const privateScore = Object.values(sprite.variables).find(variable => variable.name === 'score');
@@ -136,12 +183,20 @@ async function validate(filename, kind) {
             assert.equal(globalScore.value, 3);
             assert.equal(privateScore.value, 103);
             assert.deepEqual(logs.value, ['tick', 'tick', 'tick']);
+            const globalReset = Object.values(stage.variables).find(variable => variable.name === 'resetlog');
+            const privateReset = Object.values(sprite.variables).find(variable => variable.name === 'resetlog');
+            const inferred = Object.values(stage.variables).find(variable => variable.name === 'fresh');
+            assert.deepEqual(globalReset.value, ['global']);
+            assert.deepEqual(privateReset.value, ['local']);
+            assert.deepEqual(inferred.value, ['last']);
         }
         return {project: kind, loaded: true, serialized: true, x: sprite.x,
             ...(kind === 'hello' ? {score: 10} : kind === 'extensions'
                 ? {reporter: 6, mode: instances.get('custom').selectedMode}
                 : kind === 'demo' ? {initialX: -100, score: 20}
-                    : {globalScore: 3, privateScore: 103, recursiveCalls: 3})};
+                    : kind === 'controls' ? {loops: 3, second: 3, third: 42, after: 6}
+                    : {globalScore: 3, privateScore: 103, recursiveCalls: 3,
+                        inferredList: ['last'], globalList: ['global'], privateList: ['local']})};
     } finally {
         vm.quit();
         if (previousDocument === undefined) delete global.document;
@@ -153,8 +208,11 @@ async function validate(filename, kind) {
     const results = [];
     results.push(await validate(hello, 'hello'));
     results.push(await validate(extensions, 'extensions'));
-    if (process.argv[5]) results.push(await validate(path.resolve(process.argv[5]), 'procedures'));
-    if (process.argv[6]) results.push(await validate(path.resolve(process.argv[6]), 'demo'));
+    if (positional[3]) results.push(await validate(path.resolve(positional[3]), 'procedures'));
+    if (positional[4]) results.push(await validate(path.resolve(positional[4]), 'demo'));
+    if (controlsArgument) {
+        results.push(await validate(path.resolve(controlsArgument.slice('--controls='.length)), 'controls'));
+    }
     console.log(JSON.stringify({runtime: vmDirectory, results}, null, 2));
 })().catch(error => {
     console.error(error);

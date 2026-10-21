@@ -91,6 +91,10 @@ impl OverlaySource {
                 .collect(),
         }
     }
+
+    pub(crate) fn insert(&mut self, path: PathBuf, text: String) {
+        self.overlays.insert(path, text);
+    }
 }
 impl SourceProvider for OverlaySource {
     fn read_to_string(&self, path: &Path) -> Result<String> {

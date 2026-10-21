@@ -13,8 +13,8 @@ use std::{
 };
 use unicode_general_category::{GeneralCategory, get_general_category};
 
-mod recovery;
-pub use recovery::{ParseReport, parse_recovering};
+mod indentation;
+pub use indentation::{ParseReport, parse_recovering};
 
 #[derive(Clone, Debug)]
 struct LexError {
@@ -58,24 +58,20 @@ fn name_continue(c: char) -> bool {
     name_start(c) || get_general_category(c) == GeneralCategory::DecimalNumber
 }
 
-pub(crate) fn namespace_start(c: char) -> bool {
-    name_start(c)
-}
-
 pub(crate) fn namespace_continue(c: char) -> bool {
     name_continue(c) || matches!(c, '.' | '-')
 }
 
 pub(crate) fn is_bare_namespace(name: &str) -> bool {
     let mut chars = name.chars();
-    chars.next().is_some_and(namespace_start) && chars.all(namespace_continue)
+    chars.next().is_some_and(name_start) && chars.all(namespace_continue)
 }
 
 /// Find the namespace before the final dot in an uninterrupted name, or before
 /// an explicit opcode separator. Dots inside filenames are not qualification
 /// levels. Requiring a letter/underscore first keeps numeric literals separate.
 pub(crate) fn bare_namespace_end(source: &str, start: usize) -> Option<usize> {
-    if !next_char(source, start).is_some_and(namespace_start) {
+    if !next_char(source, start).is_some_and(name_start) {
         return None;
     }
     let mut end = advance(source, start);
@@ -85,12 +81,9 @@ pub(crate) fn bare_namespace_end(source: &str, start: usize) -> Option<usize> {
     if source[end..].starts_with("::") {
         return Some(end);
     }
-    source[start..end]
-        .rfind('.')
-        .filter(|offset| *offset > 0)
-        .map(|offset| start + offset)
+    source[start..end].rfind('.').map(|offset| start + offset)
 }
-fn bare_name_end(source: &str, start: usize) -> Option<usize> {
+pub(crate) fn bare_name_end(source: &str, start: usize) -> Option<usize> {
     if !next_char(source, start).is_some_and(name_start) {
         return None;
     }
@@ -194,21 +187,15 @@ pub fn parse_string(source: &str) -> Result<String> {
 /// Only the quote delimiter differs: `\'` is also accepted, and literal double
 /// quotes are escaped before serde_json validates the normalized string.
 fn menu_token(source: &str, start: usize) -> LexResult<(usize, String)> {
-    if !source
-        .get(start..)
-        .is_some_and(|tail| tail.starts_with("/'"))
-    {
-        return Err(lex_error(start, "menu values must use /'value'/"));
+    if next_char(source, start) != Some('\'') {
+        return Err(lex_error(start, "menu values must use 'value'"));
     }
-    let mut pos = start + 2;
+    let mut pos = start + 1;
     let mut json = String::from("\"");
-    let mut origins = vec![start + 1];
+    let mut origins = vec![start];
     while let Some(c) = next_char(source, pos) {
         match c {
             '\'' => {
-                if next_char(source, pos + 1) != Some('/') {
-                    return Err(lex_error(pos + 1, "menu quote must end immediately with /"));
-                }
                 json.push('"');
                 origins.push(pos);
                 let value = serde_json::from_str::<String>(&json).map_err(|error| {
@@ -218,7 +205,7 @@ fn menu_token(source: &str, start: usize) -> LexResult<(usize, String)> {
                         .unwrap_or(pos);
                     lex_error(offset, format!("invalid menu string: {error}"))
                 })?;
-                return Ok((pos + 2, value));
+                return Ok((pos + 1, value));
             }
             '\n' | '\r' => {
                 return Err(lex_error(pos, "menu values cannot cross physical lines"));
@@ -258,10 +245,10 @@ fn menu_token(source: &str, start: usize) -> LexResult<(usize, String)> {
             }
         }
     }
-    Err(lex_error(start, "unterminated menu; expected '/"))
+    Err(lex_error(start, "unterminated menu; expected '"))
 }
 
-/// Decode a complete `/'value'/` menu. Bare and double-quoted menus are invalid.
+/// Decode a complete `'value'` menu.
 pub fn parse_menu(source: &str) -> Result<String> {
     let (end, value) = menu_token(source, 0).map_err(public_error)?;
     if end != source.len() {
@@ -273,7 +260,7 @@ pub fn parse_menu(source: &str) -> Result<String> {
 /// Encode one menu value for completion and other generated ScratchDSL text.
 pub fn format_menu(value: &str) -> String {
     let json = serde_json::to_string(value).expect("serializing a string cannot fail");
-    format!("/'{}'/", json[1..json.len() - 1].replace('\'', "\\'"))
+    format!("'{}'", json[1..json.len() - 1].replace('\'', "\\'"))
 }
 
 fn number_end(source: &str, start: usize) -> Option<usize> {
@@ -322,7 +309,7 @@ fn number_end(source: &str, start: usize) -> Option<usize> {
 
 /// Parse one finite, complete decimal/scientific literal (no surrounding whitespace).
 pub fn parse_number(source: &str) -> Option<f64> {
-    if source.is_empty() || number_end(source, 0)? != source.len() {
+    if number_end(source, 0)? != source.len() {
         return None;
     }
     source.parse::<f64>().ok().filter(|value| value.is_finite())
@@ -350,6 +337,58 @@ pub fn parse_name(source: &str) -> Result<String> {
     }
 }
 
+/// Data names use ordinary Unicode identifiers; quoting is reserved for
+/// strings, parameter names, namespaces, and other non-data syntax.
+pub fn is_data_name(source: &str) -> bool {
+    bare_name_end(source, 0) == Some(source.len())
+}
+
+fn reference_parts(source: &str) -> (&str, usize) {
+    source
+        .strip_prefix("global:")
+        .map_or((source, 0), |tail| (tail, 7))
+}
+
+fn reference_end(source: &str, start: usize) -> LexResult<usize> {
+    let (_, prefix) = reference_parts(&source[start..]);
+    bare_name_end(source, start + prefix)
+        .ok_or_else(|| lex_error(start, "data references require an ordinary identifier"))
+}
+
+/// Decode a complete bare or global:name reference as (name, global).
+/// Declaration-aware resolution determines whether the shared name refers to a
+/// scalar variable or a list.
+pub fn parse_reference(source: &str) -> Result<(String, bool)> {
+    let (name, prefix) = reference_parts(source);
+    if !is_data_name(name) {
+        return Err(Error::new("invalid characters in variable reference"));
+    }
+    Ok((name.into(), prefix != 0))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Assignment<'a> {
+    pub target: &'a str,
+    pub operator: &'a str,
+    pub value: &'a str,
+}
+
+/// Split an assignment without resolving its target or RHS. An empty RHS is
+/// retained so editors can offer value completions while a statement is typed.
+pub fn assignment_parts(source: &str) -> Option<Assignment<'_>> {
+    let source = source.trim();
+    let end = scan_atom(source, 0).ok()?;
+    let tail = source[end..].trim_start();
+    let operator = ["+=", "-=", "*=", "/=", "%=", "="]
+        .into_iter()
+        .find(|operator| tail.starts_with(operator))?;
+    Some(Assignment {
+        target: &source[..end],
+        operator,
+        value: tail[operator.len()..].trim(),
+    })
+}
+
 /// A scan records comment spans so stripping preserves byte offsets and line numbers.
 #[derive(Clone)]
 struct Scanner<'a> {
@@ -357,11 +396,19 @@ struct Scanner<'a> {
     work: Rc<Cell<usize>>,
     hard_error: Rc<RefCell<Option<LexError>>>,
     depth: usize,
+    structural_group: Option<(usize, StructuralBoundary)>,
     source: &'a str,
     comments: Vec<(usize, usize)>,
 }
 
-type GroupCache = BTreeMap<(usize, bool), LexResult<Vec<AtomCandidate>>>;
+type GroupCache =
+    BTreeMap<(usize, bool, Option<StructuralBoundary>), LexResult<Vec<AtomCandidate>>>;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum StructuralBoundary {
+    Suite,
+    Statement,
+}
 
 #[derive(Clone)]
 struct AtomCandidate {
@@ -376,6 +423,7 @@ impl<'a> Scanner<'a> {
             work: Rc::new(Cell::new(0)),
             hard_error: Rc::new(RefCell::new(None)),
             depth: 0,
+            structural_group: None,
             source,
             comments: Vec::new(),
         }
@@ -401,12 +449,8 @@ impl<'a> Scanner<'a> {
             }
         }
     }
-    /// Data-object syntax is confined to an @init object. In particular, / is
-    /// not a menu delimiter and strings support JSON escapes in this region.
+    /// Initialization data objects use JSON strings and nested arrays.
     fn json_object(&mut self, start: usize) -> LexResult<usize> {
-        if next_char(self.source, start) != Some('{') {
-            return Err(lex_error(start, "@init requires a data object"));
-        }
         let mut closes = vec!['}'];
         let mut pos = start + 1;
         while let Some(c) = next_char(self.source, pos) {
@@ -419,7 +463,7 @@ impl<'a> Scanner<'a> {
                 }
                 '}' | ']' => {
                     if closes.pop() != Some(c) {
-                        return Err(lex_error(pos, "mismatched delimiter in @init object"));
+                        return Err(lex_error(pos, "mismatched delimiter in init object"));
                     }
                     pos += 1;
                     if closes.is_empty() {
@@ -429,25 +473,56 @@ impl<'a> Scanner<'a> {
                 _ => pos += c.len_utf8(),
             }
         }
-        Err(lex_error(start, "unclosed @init object; expected }"))
+        Err(lex_error(start, "unclosed init object; expected }"))
+    }
+    /// Locate the end of an init suite while keeping its JSON escape rules
+    /// separate from ordinary DSL strings in following sibling statements.
+    fn json_indented_body(&mut self, start: usize, indentation: usize) -> LexResult<usize> {
+        let mut pos = start;
+        let mut line_start = false;
+        while let Some(c) = next_char(self.source, pos) {
+            if matches!(c, '\n' | '\r') {
+                line_start = true;
+                pos += 1;
+                continue;
+            }
+            if matches!(c, ' ' | '\t') {
+                pos += 1;
+                continue;
+            }
+            if c == '#' {
+                let end = self.comment(pos)?;
+                if self.source[pos..end].contains(['\n', '\r']) {
+                    line_start = true;
+                }
+                pos = end;
+                continue;
+            }
+            if line_start {
+                let prefix = self.source[..pos].rsplit('\n').next().unwrap_or("");
+                if prefix
+                    .bytes()
+                    .take_while(|c| matches!(c, b' ' | b'\t'))
+                    .count()
+                    <= indentation
+                {
+                    return Ok(pos);
+                }
+            }
+            line_start = false;
+            pos = if c == '"' {
+                json_string_end(self.source, pos)?
+            } else {
+                pos + c.len_utf8()
+            };
+        }
+        Ok(pos)
     }
     fn menu(&self, start: usize) -> LexResult<usize> {
         menu_token(self.source, start).map(|(end, _)| end)
     }
-    fn symbol(&self, start: usize) -> LexResult<usize> {
-        let mut pos = start + 1;
-        if next_char(self.source, start) == Some('$') {
-            for prefix in ["global:list:", "global:", "list:"] {
-                if self.starts(pos, prefix) {
-                    pos += prefix.len();
-                    break;
-                }
-            }
-        }
-        name_end(self.source, pos)
-    }
     /// Locate the opening group of a syntactically qualified call.
-    fn qualified_open(&self, start: usize) -> LexResult<Option<(usize, bool)>> {
+    fn qualified_open(&self, start: usize) -> LexResult<Option<usize>> {
         let quoted = next_char(self.source, start) == Some('"');
         let name_end = if quoted {
             string_end(self.source, start)?
@@ -456,8 +531,7 @@ impl<'a> Scanner<'a> {
         } else {
             return Ok(None);
         };
-        let explicit = self.starts(name_end, "::");
-        let open = if explicit {
+        if self.starts(name_end, "::") {
             let opcode_start = name_end + 2;
             if next_char(self.source, opcode_start) != Some('"') {
                 return Err(lex_error(
@@ -466,31 +540,19 @@ impl<'a> Scanner<'a> {
                 ));
             }
             let opcode_end = string_end(self.source, opcode_start)?;
-            if !self.starts(opcode_end, ".") {
-                return Err(lex_error(opcode_end, "expected . after explicit opcode"));
+            if next_char(self.source, opcode_end) != Some('(') {
+                return Err(lex_error(
+                    opcode_end,
+                    "expected (...) arguments after explicit opcode",
+                ));
             }
-            opcode_end + 1
-        } else if self.starts(name_end, ".") {
-            name_end + 1
-        } else {
-            return Ok(None);
-        };
-        if explicit && self.starts(open, "hat(") {
-            return Ok(Some((open + 3, true)));
+            return Ok(Some(opcode_end));
         }
-        match next_char(self.source, open) {
-            Some('[' | '(' | '<') => Ok(Some((open, explicit))),
-            _ if explicit => Err(lex_error(
-                open,
-                "expected explicit opcode shape or hat(...)",
-            )),
-            // A qualified hat header is not a slot value; its whole header is read structurally.
-            _ => Ok(None),
-        }
+        Ok(None)
     }
     fn qualified(&mut self, start: usize) -> LexResult<Option<usize>> {
         match self.qualified_open(start)? {
-            Some((open, explicit)) => self.group(open, explicit).map(Some),
+            Some(open) => self.group(open, true).map(Some),
             None => Ok(None),
         }
     }
@@ -498,8 +560,8 @@ impl<'a> Scanner<'a> {
         match next_char(self.source, start) {
             Some('[' | '(' | '<') => return self.group_candidates(start, false),
             Some(c) if c == '"' || name_start(c) => {
-                if let Some((open, explicit)) = self.qualified_open(start)? {
-                    return self.group_candidates(open, explicit);
+                if let Some(open) = self.qualified_open(start)? {
+                    return self.group_candidates(open, true);
                 }
             }
             _ => {}
@@ -519,8 +581,12 @@ impl<'a> Scanner<'a> {
                     string_end(self.source, start)
                 }
             }
-            Some('$' | '@') => self.symbol(start),
-            Some('/') => self.menu(start),
+            Some('@') => name_end(self.source, start + 1),
+            Some('$') => Err(lex_error(
+                start,
+                "$ variable references are no longer supported; use a bare name",
+            )),
+            Some('\'') => self.menu(start),
             Some('[' | '(' | '<') => self.group(start, false),
             Some(c) if c.is_ascii_digit() || c == '-' || c == '.' => {
                 let end = number_end(self.source, start)
@@ -530,19 +596,48 @@ impl<'a> Scanner<'a> {
                 }
                 Ok(end)
             }
-            Some(c) if name_start(c) => self.qualified(start)?.ok_or_else(|| {
-                lex_error(start, "bare text is not a slot value; use a quoted string")
-            }),
+            Some(c) if name_start(c) => match self.qualified(start)? {
+                Some(end) => Ok(end),
+                None => reference_end(self.source, start),
+            },
             _ => Err(lex_error(start, "expected a complete slot value")),
         }
     }
     fn group(&mut self, start: usize, argument_list: bool) -> LexResult<usize> {
-        let candidate = self
-            .group_candidates(start, argument_list)?
+        let previous = self.structural_group;
+        if self.depth == 0 {
+            let prefix = self.source[..start]
+                .rsplit(['\r', '\n'])
+                .next()
+                .unwrap_or("")
+                .trim();
+            if is_control_header_group(self.source, start) {
+                self.structural_group = Some((start, StructuralBoundary::Suite));
+            } else if assignment_parts(prefix).is_some() || command_source(prefix) {
+                self.structural_group = Some((start, StructuralBoundary::Statement));
+            }
+        }
+        let result = self.group_candidates(start, argument_list);
+        self.structural_group = previous;
+        let candidate = result?
             .pop()
             .expect("a successful scan has at least one candidate");
         self.comments = candidate.comments;
         Ok(candidate.end)
+    }
+    fn structural_boundary(&self, start: usize) -> Option<StructuralBoundary> {
+        self.structural_group
+            .filter(|(open, _)| *open == start)
+            .map(|(_, boundary)| boundary)
+    }
+    fn ends_structural_group(&self, start: usize, end: usize) -> bool {
+        match self.structural_boundary(start) {
+            Some(StructuralBoundary::Suite) => suite_boundary_after(self.source, end),
+            Some(StructuralBoundary::Statement) => {
+                statement_boundary_after(self.source, start, end)
+            }
+            None => false,
+        }
     }
     /// Keep both meanings of a plain `>` until the enclosing group determines
     /// which complete boundaries survive. Template matching resolves any
@@ -564,7 +659,7 @@ impl<'a> Scanner<'a> {
             return Err(self.complexity_error(start, "expression nesting exceeds 128 groups"));
         }
         let prefix = std::mem::take(&mut self.comments);
-        let key = (start, argument_list);
+        let key = (start, argument_list, self.structural_boundary(start));
         let cached = self.cache.borrow().get(&key).cloned();
         let result = if let Some(cached) = cached {
             cached
@@ -591,9 +686,6 @@ impl<'a> Scanner<'a> {
         start: usize,
         argument_list: bool,
     ) -> LexResult<Vec<AtomCandidate>> {
-        if self.depth >= 128 {
-            return Err(self.complexity_error(start, "expression nesting exceeds 128 groups"));
-        }
         let open = next_char(self.source, start)
             .ok_or_else(|| lex_error(start, "expected opening bracket"))?;
         let close = match open {
@@ -616,6 +708,11 @@ impl<'a> Scanner<'a> {
         let mut steps = 0;
         while let Some((mut pos, mut possible_infix, mut left_value, mut scanner)) = pending.pop() {
             loop {
+                if results.iter().any(|candidate: &AtomCandidate| {
+                    candidate.end <= pos && self.ends_structural_group(start, candidate.end)
+                }) {
+                    break;
+                }
                 steps += 1;
                 self.work.set(self.work.get() + 1);
                 if self.work.get() > 100_000 {
@@ -653,8 +750,7 @@ impl<'a> Scanner<'a> {
                 let comparison = matches!(c, '<' | '>')
                     && possible_infix
                     && left_value
-                    && infix_right_end_inner(self.source, start, pos, false, Some(&scanner))
-                        .is_some();
+                    && infix_right_end(self.source, start, pos, false, Some(&scanner)).is_some();
                 if c == close {
                     results.push(AtomCandidate {
                         end: pos + 1,
@@ -698,58 +794,65 @@ impl<'a> Scanner<'a> {
                     break;
                 }
                 if c == '/' {
-                    if possible_infix
-                        && left_value
-                        && infix_right_end_inner(self.source, start, pos, false, Some(&scanner))
-                            .is_some()
-                    {
+                    if left_value && !argument_list && open == '(' {
                         pos += 1;
                         left_value = false;
-                        possible_infix = false;
+                        possible_infix = true;
                     } else {
-                        match scanner.menu(pos) {
-                            Ok(end) => pos = end,
-                            Err(error) => {
-                                failure = error;
-                                break;
-                            }
-                        }
-                        if left_value {
-                            possible_infix = false;
-                        }
-                        left_value = true;
+                        failure = lex_error(pos, "division requires a left operand");
+                        break;
                     }
                     continue;
                 }
-                if matches!(c, '+' | '*' | '=')
-                    || (c == '-' && possible_infix && left_value)
-                    || (scanner.starts(pos, "mod") && possible_infix && left_value)
+                if matches!(c, '+' | '*' | '%' | '=') || (c == '-' && possible_infix && left_value)
                 {
-                    pos += if scanner.starts(pos, "mod") { 3 } else { 1 };
+                    pos += 1;
                     left_value = false;
-                    possible_infix = false;
+                    possible_infix = !argument_list && open == '(';
                     continue;
                 }
-                let atom = matches!(c, '"' | '$' | '@' | '[' | '(' | '<')
+                if c == '-'
+                    && !argument_list
+                    && open == '('
+                    && !left_value
+                    && number_end(self.source, pos).is_none()
+                {
+                    pos += 1;
+                    possible_infix = true;
+                    continue;
+                }
+                let atom = matches!(c, '"' | '\'' | '$' | '@' | '[' | '(' | '<')
                     || c.is_ascii_digit()
                     || (matches!(c, '-' | '.') && number_end(self.source, pos).is_some());
-                let qualified = if name_start(c) {
-                    match scanner.qualified_open(pos) {
-                        Ok(open) => open.is_some(),
-                        Err(error) => {
-                            failure = error;
-                            break;
-                        }
+                if atom || name_start(c) {
+                    // Prefix-looking words may be fixed template labels, as
+                    // in 检查 global: (3). Keep their literal reading even when
+                    // the following text is not a valid reference name. Slot
+                    // resolution still requires a complete reference later.
+                    if !argument_list && name_start(c) && self.source[pos..].starts_with("global:")
+                    {
+                        pending.push((
+                            bare_name_end(self.source, pos).unwrap(),
+                            false,
+                            false,
+                            scanner.clone(),
+                        ));
                     }
-                } else {
-                    false
-                };
-                if atom || qualified {
                     match scanner.atom_candidates(pos) {
                         Ok(candidates) => {
                             for candidate in candidates {
                                 let mut next = scanner.clone();
                                 next.comments = candidate.comments;
+                                // A leading bare name can also be fixed
+                                // template text. Preserve that reading until
+                                // the complete template chooses between e.g.
+                                // <score < limit> and <选择 <@ok> 1>.
+                                if possible_infix
+                                    && !left_value
+                                    && bare_name_end(self.source, pos) == Some(candidate.end)
+                                {
+                                    pending.push((candidate.end, false, false, next.clone()));
+                                }
                                 pending.push((
                                     candidate.end,
                                     possible_infix && !left_value,
@@ -762,38 +865,49 @@ impl<'a> Scanner<'a> {
                     }
                     break;
                 }
-                if name_start(c) {
-                    pos = bare_name_end(self.source, pos).unwrap();
-                } else {
-                    pos += c.len_utf8();
-                }
+                pos += c.len_utf8();
                 possible_infix = false;
             }
         }
         results.sort_by_key(|candidate| candidate.end);
         results.dedup_by_key(|candidate| candidate.end);
+        if let Some(index) = results
+            .iter()
+            .position(|candidate| self.ends_structural_group(start, candidate.end))
+        {
+            results.truncate(index + 1);
+        }
         if results.is_empty() {
             Err(failure)
         } else {
             Ok(results)
         }
     }
+    fn replace_comments(self) -> String {
+        let mut bytes = self.source.as_bytes().to_vec();
+        for (start, end) in self.comments {
+            for byte in &mut bytes[start..end] {
+                if !matches!(*byte, b'\n' | b'\r') {
+                    *byte = b' ';
+                }
+            }
+        }
+        String::from_utf8(bytes).expect("whole comment spans were replaced by ASCII whitespace")
+    }
     fn clean(mut self) -> LexResult<String> {
         let mut pos = 0;
         let mut item_start = true;
-        while pos < self.source.len() {
-            let c = next_char(self.source, pos).unwrap();
-            if item_start && self.starts(pos, "@init") {
-                let tail = pos + "@init".len();
-                if next_char(self.source, tail)
-                    .is_none_or(|c| whitespace(c) || matches!(c, '{' | '#'))
-                {
-                    let object = self.trivia(tail)?;
-                    if next_char(self.source, object) == Some('{') {
-                        pos = self.json_object(object)?;
-                        item_start = false;
-                        continue;
-                    }
+        while let Some(c) = next_char(self.source, pos) {
+            if item_start && self.starts(pos, "init") {
+                let mut tail = pos + 4;
+                while next_char(self.source, tail).is_some_and(|c| matches!(c, ' ' | '\t')) {
+                    tail += 1;
+                }
+                if next_char(self.source, tail) == Some(':') {
+                    let indentation = self.source[..pos].rsplit('\n').next().unwrap_or("").len();
+                    pos = self.json_indented_body(tail + 1, indentation)?;
+                    item_start = true;
+                    continue;
                 }
             }
             match c {
@@ -805,7 +919,7 @@ impl<'a> Scanner<'a> {
                     pos = end;
                     continue;
                 }
-                '\n' | '\r' | '{' => {
+                '\n' | '\r' => {
                     item_start = true;
                     pos += 1;
                     continue;
@@ -825,7 +939,7 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 '(' | '[' | '<' => pos = self.group(pos, false)?,
-                '/' => pos = self.menu(pos)?,
+                '\'' => pos = self.menu(pos)?,
                 c if name_start(c) => {
                     if let Some(end) = self.qualified(pos)? {
                         pos = end;
@@ -836,25 +950,142 @@ impl<'a> Scanner<'a> {
                 _ => pos += c.len_utf8(),
             }
         }
-        let mut bytes = self.source.as_bytes().to_vec();
-        for (start, end) in self.comments {
-            for byte in &mut bytes[start..end] {
-                if *byte != b'\n' && *byte != b'\r' {
-                    *byte = b' ';
-                }
-            }
-        }
-        Ok(
-            String::from_utf8(bytes)
-                .expect("whole comment spans were replaced by ASCII whitespace"),
-        )
+        Ok(self.replace_comments())
     }
+}
+
+pub(super) fn physical_line_end(source: &str, start: usize) -> usize {
+    source[start..]
+        .find(['\n', '\r'])
+        .map_or(source.len(), |offset| start + offset)
 }
 
 /// Scan a complete value at `start`, returning its exclusive UTF-8 byte offset.
 /// Qualified namespace/opcode calls are indivisible. Callers validate slot types.
 pub fn scan_atom(source: &str, start: usize) -> Result<usize> {
     scan_atom_candidates(source, start).map(|ends| *ends.last().expect("a valid atom has an end"))
+}
+
+/// A completed value followed by a suite colon ends the structural header.
+/// Bare names can also be fixed template text, so a lexical alternative may
+/// otherwise mistake the first comparison RHS for a nested boolean and scan
+/// beyond the suite into later statements.
+fn suite_boundary_after(source: &str, end: usize) -> bool {
+    let tail = source[end..].trim_start_matches([' ', '\t']);
+    tail.strip_prefix(':').is_some_and(|tail| {
+        let tail = tail.trim_start_matches([' ', '\t']);
+        tail.is_empty() || tail.starts_with(['\r', '\n', '#'])
+    })
+}
+
+/// Scan the rest of a statement, including fixed text and further input
+/// shells. A shorter comparison candidate leaves an unmatched `>` here and
+/// cannot end a statement. Try one physical line first so ordinary adjacent
+/// commands never require scanning the remainder of the document.
+fn statement_tail(source: &str, start: usize) -> Option<(usize, bool, bool)> {
+    fn scan(source: &str, start: usize) -> Option<(usize, bool, bool)> {
+        let mut scanner = Scanner::new(source);
+        let mut pos = start;
+        let mut input = false;
+        let mut fixed = false;
+        while let Some(c) = next_char(source, pos) {
+            match c {
+                '\r' | '\n' => break,
+                ' ' | '\t' => pos += 1,
+                '#' => pos = scanner.comment(pos).ok()?,
+                '(' | '<' => {
+                    pos = scanner.group_candidates(pos, false).ok()?.last()?.end;
+                    input = true;
+                }
+                '"' => {
+                    pos = string_end(source, pos).ok()?;
+                    input = true;
+                }
+                '\'' => {
+                    pos = scanner.menu(pos).ok()?;
+                    input = true;
+                }
+                ')' | '>' | '[' | ']' | '{' | '}' => return None,
+                _ => {
+                    fixed = true;
+                    pos += c.len_utf8();
+                }
+            }
+        }
+        Some((pos, input, fixed))
+    }
+
+    let end = physical_line_end(source, start);
+    scan(&source[..end], start)
+        .or_else(|| (end < source.len()).then(|| scan(source, start)).flatten())
+}
+
+fn statement_boundary_after(source: &str, start: usize, end: usize) -> bool {
+    let Some((pos, _, _)) = statement_tail(source, end) else {
+        return false;
+    };
+    let mut scanner = Scanner::new(source);
+    let Ok(next) = scanner.trivia(pos) else {
+        return false;
+    };
+    if next == source.len() {
+        return true;
+    }
+    let line = source[next..]
+        .split(['\r', '\n'])
+        .next()
+        .unwrap_or("")
+        .trim_end();
+    if line.starts_with('[') || line == "pass" || assignment_parts(line).is_some() {
+        return true;
+    }
+    let header = line.strip_suffix(':').map_or(line, str::trim_end);
+    if !line.ends_with('>')
+        && (declaration_header(header)
+            || control_header(header)
+            || branch_header(header)
+            || keyword_rest(header, "start").is_some())
+    {
+        return true;
+    }
+    // The next command can start with an input and can itself have multiline
+    // inputs. Continued comparison operands leave an unmatched outer closer;
+    // a lone parenthesized operand has no fixed command text.
+    let Some((line_end, input, fixed)) = statement_tail(source, next) else {
+        return false;
+    };
+    if input && fixed && command_source(line) {
+        return true;
+    }
+    // Zero-input commands at the statement's indentation are also siblings.
+    // An indented bare operand remains available to a multiline comparison.
+    let indentation = |pos| {
+        source[..pos]
+            .rsplit(['\r', '\n'])
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take_while(|c| matches!(c, ' ' | '\t'))
+            .count()
+    };
+    bare_name_end(line, 0) == Some(line.len())
+        && indentation(next) <= indentation(start)
+        && scanner
+            .trivia(line_end)
+            .is_ok_and(|after| next_char(source, after) != Some('>'))
+}
+
+fn is_control_header_group(source: &str, start: usize) -> bool {
+    // Qualified expressions are templates: a colon after a nested input can
+    // be literal text, including at a physical line break. Only a direct
+    // control operand is eligible for the suite-boundary shortcut.
+    let prefix = source[..start]
+        .rsplit(['\r', '\n'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    matches!(prefix, "if" | "elif" | "while" | "loop")
+        && !qualified_source(source[start + 1..].trim_start())
 }
 
 /// Complete atom boundaries, sorted and deduplicated. Plain comparisons may
@@ -875,11 +1106,10 @@ pub fn scan_atom_candidates(source: &str, start: usize) -> Result<Vec<usize>> {
         .map_err(public_error)
 }
 
-/// Locate a binary operator within an ordinary `(...)` or `<...>` expression.
-/// The left side must be exactly one complete value. Strict callers require a
-/// complete right value followed by this group's close. Editor callers may
-/// accept an unfinished right value, but a complete menu stays a menu and
-/// a plain `>` can also close a boolean group. Explicit opcode argument
+/// Locate an infix operator within an ordinary `(...)` or `<...>` expression.
+/// Arithmetic sides can be complete operator chains; comparison sides must be
+/// single values. Editor callers may accept an unfinished right value, while
+/// quoted menus stay intact and a plain `>` can close a boolean group. Explicit opcode argument
 /// groups are not infix expressions and must be excluded by the caller.
 pub fn infix_operator_at(
     source: &str,
@@ -890,28 +1120,77 @@ pub fn infix_operator_at(
     if open >= position || !source.is_char_boundary(open) || !source.is_char_boundary(position) {
         return None;
     }
-    if !matches!(next_char(source, open), Some('(' | '<')) {
+    let open_char = next_char(source, open)?;
+    if !matches!(open_char, '(' | '<') {
         return None;
     }
-    let mut left = Scanner::new(source.get(..position)?);
+    if open_char == '('
+        && next_char(source, position).is_some_and(|c| matches!(c, '+' | '-' | '*' | '/' | '%'))
+    {
+        if !arithmetic_fragment_complete(&source[open + 1..position]) {
+            return None;
+        }
+        let end = position + 1;
+        if let Ok(candidates) = scan_atom_candidates(source, open) {
+            for close in candidates {
+                if close > end + 1 && arithmetic_fragment_complete(&source[end..close - 1]) {
+                    return Some(end);
+                }
+            }
+        }
+        return allow_incomplete
+            .then(|| infix_right_end(source, open, position, true, None))
+            .flatten();
+    }
+    let mut left = Scanner::new(&source[..position]);
     let left_start = left.trivia(open + 1).ok()?;
     let left_end = left.atom(left_start).ok()?;
     if left.trivia(left_end).ok()? != position {
         return None;
     }
-    infix_right_end(source, open, position, allow_incomplete)
+    infix_right_end(source, open, position, allow_incomplete, None)
+}
+
+/// Check a mathematical fragment without resolving variable names or reporter
+/// templates. This also works on a prefix ending at an editor cursor.
+fn arithmetic_fragment_complete(source: &str) -> bool {
+    let mut scanner = Scanner::new(source);
+    let mut pos = 0;
+    let mut needs_operand = true;
+    loop {
+        let Ok(next) = scanner.trivia(pos) else {
+            return false;
+        };
+        pos = next;
+        let Some(c) = next_char(source, pos) else {
+            return !needs_operand;
+        };
+        if needs_operand {
+            if c == '-' && number_end(source, pos).is_none() {
+                pos += 1;
+                continue;
+            }
+            match scanner
+                .atom(pos)
+                .ok()
+                .or_else(|| bare_name_end(source, pos))
+            {
+                Some(end) => {
+                    pos = end;
+                    needs_operand = false;
+                }
+                None => return false,
+            }
+        } else if matches!(c, '+' | '-' | '*' | '/' | '%') {
+            pos += 1;
+            needs_operand = true;
+        } else {
+            return false;
+        }
+    }
 }
 
 fn infix_right_end(
-    source: &str,
-    open: usize,
-    position: usize,
-    allow_incomplete: bool,
-) -> Option<usize> {
-    infix_right_end_inner(source, open, position, allow_incomplete, None)
-}
-
-fn infix_right_end_inner(
     source: &str,
     open: usize,
     position: usize,
@@ -924,20 +1203,13 @@ fn infix_right_end_inner(
         _ => return None,
     };
     let tail = source.get(position..)?;
-    let length = if tail.starts_with("mod") {
-        3
-    } else if tail.starts_with(['+', '-', '*', '/', '=', '<', '>']) {
-        if tail.as_bytes().get(1) == Some(&b'*') {
-            return None;
-        }
-        1
-    } else {
+    if !tail.starts_with(['+', '-', '*', '/', '%', '=', '<', '>']) {
         return None;
-    };
+    }
     if tail.starts_with(['<', '>']) && close != '>' {
         return None;
     }
-    let end = position + length;
+    let end = position + 1;
     let mut right = context.cloned().unwrap_or_else(|| Scanner::new(source));
     let right_start = right.trivia(end).ok()?;
     if let Ok(candidates) = right.atom_candidates(right_start) {
@@ -952,9 +1224,6 @@ fn infix_right_end_inner(
     if !allow_incomplete {
         return None;
     }
-    if tail.starts_with('/') && right.menu(position).is_ok() {
-        return None;
-    }
     let Some(first) = next_char(source, right_start) else {
         return (!tail.starts_with('>')).then_some(end);
     };
@@ -962,24 +1231,17 @@ fn infix_right_end_inner(
         return None;
     }
     // Do not turn a close into an operator because a subsequent declaration
-    // happens to start with @ on another physical line.
+    // happens to start on another physical line.
     if source[end..right_start].contains(['\n', '\r'])
         && [
-            "@sprite",
-            "@stage",
-            "@var",
-            "@list",
-            "@global",
-            "@init",
-            "import",
-            "定义自制积木",
+            "sprite", "stage", "var", "list", "global", "init", "def", "start", "import",
         ]
         .iter()
         .any(|keyword| starts_keyword(&source[right_start..], keyword))
     {
         return None;
     }
-    (matches!(first, '"' | '$' | '@' | '(' | '<' | '-' | '.')
+    (matches!(first, '"' | '@' | '(' | '<' | '-' | '.')
         || first.is_ascii_digit()
         || name_start(first))
     .then_some(end)
@@ -997,375 +1259,7 @@ enum Context {
     Sprite,
 }
 
-struct Parser<'a> {
-    file: String,
-    original: &'a str,
-    source: String,
-    pos: usize,
-}
-impl Parser<'_> {
-    fn span(&self, pos: usize) -> Span {
-        let end = self
-            .original
-            .get(pos..)
-            .and_then(|s| s.chars().next())
-            .map_or(pos, |c| pos + c.len_utf8());
-        Span::from_source(Path::new(&self.file), self.original, pos, end)
-    }
-    fn range(&self, start: usize, end: usize) -> Span {
-        // Headers are parsed from trimmed text. Exclude trailing whitespace and
-        // stripped comments from their diagnostic range as well.
-        let end = start + self.source[start..end].trim_end().len();
-        Span::from_source(Path::new(&self.file), self.original, start, end)
-    }
-    fn error(&self, pos: usize, message: impl Into<String>) -> Error {
-        Error::new(message).at(&self.span(pos))
-    }
-    fn skip_space(&mut self) {
-        self.pos = skip_space(&self.source, self.pos);
-    }
-    fn separator(&mut self) -> Result<()> {
-        let mut pos = self.pos;
-        while matches!(next_char(&self.source, pos), Some(' ' | '\t')) {
-            pos += 1;
-        }
-        match next_char(&self.source, pos) {
-            None | Some('}' | '\n' | '\r') => {
-                self.pos = pos;
-                Ok(())
-            }
-            _ => Err(self.error(
-                pos,
-                "multiple sibling statements must be separated by a newline",
-            )),
-        }
-    }
-    /// Read a declaration/header/command until a body, sibling newline, or parent close.
-    fn unit(&mut self) -> Result<(usize, String, bool)> {
-        let start = self.pos;
-        let mut pos = start;
-        let mut scanner = Scanner::new(&self.source);
-        while let Some(c) = next_char(&self.source, pos) {
-            match c {
-                '{' => {
-                    let text = self.source[start..pos].trim().to_string();
-                    self.pos = pos + 1;
-                    return Ok((start, text, true));
-                }
-                '}' | '\n' | '\r' => break,
-                '"' => {
-                    pos = if let Some(end) = scanner
-                        .qualified(pos)
-                        .map_err(|e| self.error(e.offset, e.message))?
-                    {
-                        end
-                    } else {
-                        string_end(&self.source, pos)
-                            .map_err(|e| self.error(e.offset, e.message))?
-                    };
-                }
-                '(' | '[' | '<' => {
-                    pos = scanner
-                        .group(pos, false)
-                        .map_err(|e| self.error(e.offset, e.message))?
-                }
-                '/' => {
-                    pos = scanner
-                        .menu(pos)
-                        .map_err(|e| self.error(e.offset, e.message))?
-                }
-                c if name_start(c) => {
-                    if let Some(end) = scanner
-                        .qualified(pos)
-                        .map_err(|e| self.error(e.offset, e.message))?
-                    {
-                        pos = end;
-                    } else {
-                        pos = bare_name_end(&self.source, pos).unwrap();
-                    }
-                }
-                ')' | ']' | '>' => return Err(self.error(pos, "unmatched closing bracket")),
-                _ => pos += c.len_utf8(),
-            }
-        }
-        self.pos = pos;
-        Ok((start, self.source[start..pos].trim().to_string(), false))
-    }
-    fn items(&mut self, context: Context, nested: bool) -> Result<Vec<Item>> {
-        let mut result = Vec::new();
-        loop {
-            self.skip_space();
-            match next_char(&self.source, self.pos) {
-                None if nested => {
-                    return Err(self.error(self.pos, "unclosed declaration body; expected }"));
-                }
-                None => return Ok(result),
-                Some('}') if nested => {
-                    self.pos += 1;
-                    return Ok(result);
-                }
-                Some('}') => return Err(self.error(self.pos, "unexpected } at file top level")),
-                _ => {}
-            }
-            let (start, header, body) = self.unit()?;
-            let span = self.range(start, self.pos.saturating_sub(usize::from(body)));
-            if let Some(rest) = keyword_rest(&header, "import") {
-                if context == Context::Sprite {
-                    return Err(self.error(start, "import is not allowed inside a sprite"));
-                }
-                if body {
-                    return Err(self.error(start, "import does not have a body"));
-                }
-                if rest.is_empty()
-                    || !rest
-                        .split('.')
-                        .all(|part| !part.starts_with('"') && parse_name(part).is_ok())
-                {
-                    return Err(
-                        self.error(start, "import requires a dotted module name without .sbdsl")
-                    );
-                }
-                if rest.ends_with(".sbdsl") {
-                    return Err(self.error(start, "omit the .sbdsl extension in import"));
-                }
-                result.push(Item::Import {
-                    module: rest.into(),
-                    span,
-                });
-            } else if let Some(rest) = keyword_rest(&header, "@stage") {
-                if context != Context::File {
-                    return Err(
-                        self.error(start, "@stage is only allowed directly at file top level")
-                    );
-                }
-                if !rest.is_empty() || !body {
-                    return Err(self.error(start, "expected @stage { ... }"));
-                }
-                result.push(Item::Stage(self.items(Context::Stage, true)?));
-            } else if let Some(rest) = keyword_rest(&header, "@sprite") {
-                if context == Context::Sprite {
-                    return Err(self.error(
-                        start,
-                        "sprite declarations cannot be nested inside a sprite",
-                    ));
-                }
-                if !body {
-                    return Err(self.error(start, "sprite declaration needs a body"));
-                }
-                if !rest.starts_with('"') {
-                    return Err(self.error(start, "sprite name must be double quoted"));
-                }
-                let name_end = string_end(rest, 0).map_err(|e| self.error(start, e.message))?;
-                let name = parse_string(&rest[..name_end]).map_err(|e| self.error(start, e.0))?;
-                let tail = rest[name_end..].trim();
-                if !tail.is_empty() && tail != "add" {
-                    return Err(self.error(start, "expected optional add after sprite name"));
-                }
-                result.push(Item::Sprite {
-                    name,
-                    add: tail == "add",
-                    init: if tail == "add" {
-                        None
-                    } else {
-                        Some(self.sprite_init()?)
-                    },
-                    items: self.items(Context::Sprite, true)?,
-                    span,
-                });
-            } else if keyword_rest(&header, "@var").is_some()
-                || keyword_rest(&header, "@list").is_some()
-                || keyword_rest(&header, "@global").is_some()
-            {
-                if body {
-                    return Err(self.error(start, "data declaration does not have a script body"));
-                }
-                result.push(self.data(&header, context, start)?);
-            } else if let Some(rest) = keyword_rest(&header, "定义自制积木") {
-                if !body || rest.is_empty() {
-                    return Err(self.error(
-                        start,
-                        "procedure definition needs a nonempty header and a body",
-                    ));
-                }
-                result.push(Item::Procedure {
-                    header: rest.into(),
-                    body: self.statements()?,
-                    span,
-                });
-            } else {
-                if keyword_rest(&header, "@init").is_some() {
-                    return Err(self.error(
-                        start,
-                        "@init must appear exactly once as the first item of a new sprite; it is forbidden in add and other bodies",
-                    ));
-                }
-                if header.starts_with('@') {
-                    return Err(self.error(start, "unknown or misplaced declaration"));
-                }
-                if !body {
-                    return Err(self.error(start, "only declarations and event scripts are allowed here; commands need a script body"));
-                }
-                if control_header(&header) || keyword_rest(&header, "否则").is_some() {
-                    return Err(self.error(
-                        start,
-                        "control flow is only allowed inside an event or procedure body",
-                    ));
-                }
-                if header.is_empty() {
-                    return Err(self.error(start, "event body needs a hat header"));
-                }
-                result.push(Item::Script {
-                    header,
-                    body: self.statements()?,
-                    span,
-                });
-            }
-            self.separator()?;
-        }
-    }
-    fn sprite_init(&mut self) -> Result<SpriteInit> {
-        self.skip_space();
-        let start = self.pos;
-        if !starts_keyword(&self.source[start..], "@init") {
-            return Err(self.error(start, "a new sprite must begin with @init { ... }"));
-        }
-        let (_, header, body) = self.unit()?;
-        if header != "@init" || !body {
-            return Err(self.error(start, "expected @init followed by a data object"));
-        }
-        let object = self.pos - 1;
-        let end = Scanner::new(&self.source)
-            .json_object(object)
-            .map_err(|e| self.error(e.offset, e.message))?;
-        let init: SpriteInit = crate::notation::parse_region(
-            Path::new(&self.file),
-            self.original,
-            object..end,
-            false,
-        )?;
-        init.validate()
-            .map_err(|error| error.at(&self.span(start)))?;
-        self.pos = end;
-        self.separator()?;
-        Ok(init)
-    }
-    fn data(&self, header: &str, context: Context, start: usize) -> Result<Item> {
-        let (global, declaration) = if let Some(rest) = keyword_rest(header, "@global") {
-            if context != Context::Sprite {
-                return Err(self.error(
-                    start,
-                    "@global modifier is only allowed in a sprite declaration body",
-                ));
-            }
-            (true, rest)
-        } else {
-            (false, header)
-        };
-        let (list, rest) = if let Some(rest) = keyword_rest(declaration, "@var") {
-            (false, rest)
-        } else if let Some(rest) = keyword_rest(declaration, "@list") {
-            (true, rest)
-        } else {
-            return Err(self.error(start, "@global must precede @var or @list"));
-        };
-        let end = name_end(rest, 0).map_err(|e| self.error(start, e.message))?;
-        let name = parse_name(&rest[..end]).map_err(|e| self.error(start, e.0))?;
-        let tail = rest[end..].trim();
-        let value = if tail.is_empty() {
-            if list {
-                Value::Array(vec![])
-            } else {
-                Value::from(0)
-            }
-        } else if let Some(initializer) = tail.strip_prefix('=') {
-            let initializer = initializer.trim();
-            if list {
-                parse_list(initializer).map_err(|e| self.error(start, e.0))?
-            } else {
-                parse_literal(initializer).map_err(|e| self.error(start, e.0))?
-            }
-        } else {
-            return Err(self.error(start, "expected = or end of data declaration"));
-        };
-        Ok(Item::Data {
-            name,
-            value,
-            list,
-            global,
-            span: self.range(start, start + header.len()),
-        })
-    }
-    fn statements(&mut self) -> Result<Vec<Statement>> {
-        let mut result = Vec::new();
-        loop {
-            self.skip_space();
-            match next_char(&self.source, self.pos) {
-                None => return Err(self.error(self.pos, "unclosed script body; expected }")),
-                Some('}') => {
-                    self.pos += 1;
-                    return Ok(result);
-                }
-                _ => {}
-            }
-            let (start, header, body) = self.unit()?;
-            let span = self.range(start, self.pos.saturating_sub(usize::from(body)));
-            if header.starts_with('@')
-                || keyword_rest(&header, "import").is_some()
-                || keyword_rest(&header, "定义自制积木").is_some()
-            {
-                return Err(self.error(
-                    start,
-                    "declarations and imports are not allowed inside a script body",
-                ));
-            }
-            if body {
-                if !control_header(&header) {
-                    return Err(self.error(
-                        start,
-                        "only built-in control flow may introduce a nested script body",
-                    ));
-                }
-                let then_body = self.statements()?;
-                let after_body = self.pos;
-                self.skip_space();
-                let mut else_body = None;
-                if starts_keyword(&self.source[self.pos..], "否则") {
-                    if keyword_rest(&header, "如果").is_none() {
-                        return Err(self.error(self.pos, "otherwise branch requires an if control"));
-                    }
-                    let else_start = self.pos;
-                    let (_, otherwise, has_body) = self.unit()?;
-                    if otherwise != "否则" || !has_body {
-                        return Err(self.error(else_start, "expected 否则 { ... }"));
-                    }
-                    else_body = Some(self.statements()?);
-                } else {
-                    self.pos = after_body;
-                }
-                result.push(Statement::Control {
-                    header,
-                    body: then_body,
-                    else_body,
-                    span,
-                });
-            } else {
-                if !command_source(&header) {
-                    return Err(self.error(
-                        start,
-                        "expected a complete command block or control-flow body",
-                    ));
-                }
-                result.push(Statement::Command {
-                    source: header,
-                    span,
-                });
-            }
-            self.separator()?;
-        }
-    }
-}
-
-fn keyword_rest<'a>(source: &'a str, keyword: &str) -> Option<&'a str> {
+pub(crate) fn keyword_rest<'a>(source: &'a str, keyword: &str) -> Option<&'a str> {
     let tail = source.strip_prefix(keyword)?;
     if tail.is_empty() || tail.chars().next().is_some_and(whitespace) {
         Some(tail.trim())
@@ -1373,52 +1267,80 @@ fn keyword_rest<'a>(source: &'a str, keyword: &str) -> Option<&'a str> {
         None
     }
 }
+fn data_header(header: &str) -> bool {
+    ["var", "list", "global"]
+        .iter()
+        .any(|key| keyword_rest(header, key).is_some())
+}
+pub(crate) fn declaration_header(header: &str) -> bool {
+    header.starts_with('@')
+        || [
+            "var", "list", "global", "def", "sprite", "stage", "init", "import",
+        ]
+        .iter()
+        .any(|key| keyword_rest(header, key).is_some())
+}
+fn if_header(header: &str) -> bool {
+    ["if", "elif"]
+        .iter()
+        .any(|key| keyword_rest(header, key).is_some())
+}
+fn branch_header(header: &str) -> bool {
+    ["elif", "else"]
+        .iter()
+        .any(|key| keyword_rest(header, key).is_some())
+}
 fn starts_keyword(source: &str, keyword: &str) -> bool {
     source.strip_prefix(keyword).is_some_and(|tail| {
         tail.is_empty()
             || tail
                 .chars()
                 .next()
-                .is_some_and(|c| whitespace(c) || c == '{')
+                .is_some_and(|c| whitespace(c) || matches!(c, '{' | ':'))
     })
 }
 fn control_header(header: &str) -> bool {
-    ["如果", "重复执行", "重复执行直到", "循环"]
+    ["if", "loop", "while"]
         .iter()
         .any(|key| keyword_rest(header, key).is_some())
 }
+fn obsolete_header(header: &str) -> bool {
+    [
+        "定义自制积木",
+        "如果",
+        "否则",
+        "重复执行",
+        "重复执行直到",
+        "循环",
+        "当绿旗被点击",
+        "define",
+        "repeat",
+        "forever",
+        "until",
+    ]
+    .iter()
+    .any(|key| keyword_rest(header, key).is_some())
+}
 fn command_source(source: &str) -> bool {
-    if scan_atom(source, 0).ok() != Some(source.len()) {
-        return false;
-    }
-    if source.starts_with('[') {
-        return true;
-    }
-    let name_end = if source.starts_with('"') {
-        string_end(source, 0).ok()
+    !source.is_empty() && !source.starts_with(['[', '@', '$'])
+}
+
+fn qualified_source(source: &str) -> bool {
+    if source.starts_with('"') {
+        string_end(source, 0)
+            .is_ok_and(|end| source[end..].starts_with('.') || source[end..].starts_with("::"))
     } else {
-        bare_namespace_end(source, 0)
-    };
-    let Some(name_end) = name_end else {
-        return false;
-    };
-    if let Some(tail) = source[name_end..].strip_prefix('.') {
-        return tail.starts_with('[');
+        bare_namespace_end(source, 0).is_some()
     }
-    if source[name_end..].starts_with("::") {
-        let start = name_end + 2;
-        let Ok(end) = string_end(source, start) else {
-            return false;
-        };
-        return source[end..].starts_with(".[");
-    }
-    false
 }
 fn parse_literal(source: &str) -> Result<Value> {
     if source.starts_with('"') {
         return parse_string(source).map(Value::String);
     }
-    if parse_number(source).is_some() && !source.contains(['.', 'e', 'E']) {
+    let number = parse_number(source).ok_or_else(|| {
+        Error::new("initializers must be finite numeric literals or quoted strings")
+    })?;
+    if !source.contains(['.', 'e', 'E']) {
         if let Ok(value) = source.parse::<i64>() {
             return Ok(Value::from(value));
         }
@@ -1426,72 +1348,55 @@ fn parse_literal(source: &str) -> Result<Value> {
             return Ok(Value::from(value));
         }
     }
-    parse_number(source)
-        .and_then(Number::from_f64)
+    Number::from_f64(number)
         .map(Value::Number)
         .ok_or_else(|| Error::new("initializers must be finite numeric literals or quoted strings"))
 }
-fn parse_list(source: &str) -> Result<Value> {
-    if !source.starts_with('[') {
-        return Err(Error::new(
-            "list initializer must be a one-dimensional literal array",
-        ));
-    }
+fn parse_list(source: &str) -> Result<Vec<Value>> {
     let mut pos = skip_space(source, 1);
     let mut values = Vec::new();
-    if next_char(source, pos) == Some(']') {
-        if skip_space(source, pos + 1) != source.len() {
-            return Err(Error::new("unexpected text after list initializer"));
-        }
-        return Ok(Value::Array(values));
-    }
-    loop {
-        let end = if next_char(source, pos) == Some('"') {
-            string_end(source, pos).map_err(public_error)?
-        } else {
-            number_end(source, pos).ok_or_else(|| {
-                Error::new("list items must be numbers or quoted strings; nesting is not allowed")
-            })?
-        };
-        values.push(parse_literal(&source[pos..end])?);
-        pos = skip_space(source, end);
-        match next_char(source, pos) {
-            Some(']') => {
-                if skip_space(source, pos + 1) != source.len() {
-                    return Err(Error::new("unexpected text after list initializer"));
+    if next_char(source, pos) != Some('}') {
+        loop {
+            let end = if next_char(source, pos) == Some('"') {
+                string_end(source, pos).map_err(public_error)?
+            } else {
+                number_end(source, pos).ok_or_else(|| {
+                    Error::new(
+                        "list items must be numbers or quoted strings; nesting is not allowed",
+                    )
+                })?
+            };
+            values.push(parse_literal(&source[pos..end])?);
+            pos = skip_space(source, end);
+            match next_char(source, pos) {
+                Some('}') => break,
+                Some(',') => {
+                    pos = skip_space(source, pos + 1);
+                    if next_char(source, pos) == Some('}') {
+                        return Err(Error::new(
+                            "trailing comma is not allowed in list initializer",
+                        ));
+                    }
                 }
-                return Ok(Value::Array(values));
-            }
-            Some(',') => {
-                pos = skip_space(source, pos + 1);
-                if next_char(source, pos) == Some(']') {
-                    return Err(Error::new(
-                        "trailing comma is not allowed in list initializer",
-                    ));
+                _ => {
+                    return Err(Error::new("expected comma or } in list initializer"));
                 }
             }
-            _ => return Err(Error::new("expected comma or ] in list initializer")),
         }
     }
+    if skip_space(source, pos + 1) != source.len() {
+        return Err(Error::new("unexpected text after list initializer"));
+    }
+    Ok(values)
 }
 
 /// Parse one complete `.sbdsl` file into structural AST items.
 pub fn parse(path: &Path, source: &str) -> Result<Vec<Item>> {
-    let file = path.display().to_string();
-    let cleaned = Scanner::new(source).clean().map_err(|e| {
-        let end = source
-            .get(e.offset..)
-            .and_then(|s| s.chars().next())
-            .map_or(e.offset, |c| e.offset + c.len_utf8());
-        Error::new(e.message).at_source(path, source, e.offset, end)
-    })?;
-    Parser {
-        file,
-        original: source,
-        source: cleaned,
-        pos: 0,
+    let report = parse_recovering(path, source);
+    match report.errors.into_iter().next() {
+        Some(error) => Err(error),
+        None => Ok(report.items),
     }
-    .items(Context::File, false)
 }
 
 #[cfg(test)]
@@ -1504,15 +1409,15 @@ mod tests {
     #[test]
     fn single_quoted_menus_use_json_escapes_and_keep_literal_punctuation() {
         for (text, expected) in [
-            ("/''/", ""),
-            ("/'/'/", "/"),
-            ("/'*'/", "*"),
-            ("/' a # b '/", " a # b "),
-            (r#"/'"quoted"'/"#, "\"quoted\""),
             (
-                r#"/'a\'b\\c\n\r\t\b\f\/\"\u4E2D\uD83D\uDE00'/"#,
+                r#"'a\'b\\c\n\r\t\b\f\/\"\u4E2D\uD83D\uDE00'"#,
                 "a'b\\c\n\r\t\u{8}\u{c}/\"中😀",
             ),
+            ("''", ""),
+            ("'/'", "/"),
+            ("'*'", "*"),
+            ("' a # b '", " a # b "),
+            (r#"'"quoted"'"#, "\"quoted\""),
         ] {
             assert_eq!(parse_menu(text).unwrap(), expected, "{text}");
             assert_eq!(scan_atom(text, 0).unwrap(), text.len(), "{text}");
@@ -1521,9 +1426,10 @@ mod tests {
         for value in ["", "'", "\\'", "\u{0}", "\t\n\r", "引号\"/😀"] {
             assert_eq!(parse_menu(&format_menu(value)).unwrap(), value);
         }
-        let text = "当绿旗被点击 {\n [选择 /'a#b/}<>;'/]\n [等待 (8 / 2) 秒] # comment\n}";
+        assert_eq!(format_menu("空格"), "'空格'");
+        let text = "start:\n 选择 'a#b/}<>;'\n 等待 (8 / 2) 秒 # comment\n";
         let cleaned = strip_comments(text).unwrap();
-        assert!(cleaned.contains("/'a#b/}<>;'/"));
+        assert!(cleaned.contains("'a#b/}<>;'"));
         assert!(!cleaned.contains("# comment"));
         assert!(source(text).is_ok());
     }
@@ -1531,6 +1437,12 @@ mod tests {
     #[test]
     fn menus_reject_other_delimiters_bad_escapes_and_line_breaks() {
         for text in [
+            "/'value'/",
+            "'value",
+            "'value'tail",
+            r#"'\q'"#,
+            "'a\nb'",
+            "'a\tb'",
             "//",
             "/space/",
             "/*/",
@@ -1538,16 +1450,12 @@ mod tests {
             "/'value' /",
             "/'value/",
             "/'value'",
-            "/'value'/tail",
-            r#"/'\q'/"#,
-            r#"/'\x20'/"#,
-            r#"/'\u123'/"#,
-            r#"/'\uD800'/"#,
-            r#"/'\uDC00'/"#,
-            "/'a\nb'/",
-            "/'a\rb'/",
-            "/'a\tb'/",
-            "/'a\\\nb'/",
+            r#"'\x20'"#,
+            r#"'\u123'"#,
+            r#"'\uD800'"#,
+            r#"'\uDC00'"#,
+            "'a\rb'",
+            "'a\\\nb'",
         ] {
             assert!(parse_menu(text).is_err(), "{text:?}");
         }
@@ -1558,17 +1466,20 @@ mod tests {
 
     #[test]
     fn plain_comparison_candidates_preserve_enclosing_boolean_boundaries() {
-        let text = "<@flag> 1>";
-        assert_eq!(scan_atom_candidates(text, 0).unwrap(), vec![7, text.len()]);
+        let text = "<@flag > 1>";
+        assert_eq!(
+            scan_atom_candidates(text, 0).unwrap(),
+            vec![text.find('>').unwrap() + 1, text.len()]
+        );
         for text in [
-            "<$hp < 1>",
-            "<$score>100>",
+            "<hp < 1>",
+            "<score > 100>",
             "<@steps > 1>",
             "<<@ok> > 0>",
             "<<1 < 2> = <3 > 2>>",
-            "ext.<模板 <@ok> 1>",
-            "ext.<模板 <@ok> <2 > 1>>",
-            "ext::\"call\".[<@ok>, 1, <@steps > 1>]",
+            "<ext.模板 <@ok> (1)>",
+            "<ext.模板 <@ok> <2 > 1>>",
+            "ext::\"call\"(<@ok>, (1), <@steps > 1>)",
         ] {
             assert!(
                 scan_atom_candidates(text, 0).unwrap().contains(&text.len()),
@@ -1576,7 +1487,7 @@ mod tests {
             );
         }
         assert_eq!(infix_operator_at("<@flag>", 0, 6, true), None);
-        assert_eq!(infix_operator_at("<@n > $>", 0, 4, true), Some(5));
+        assert_eq!(infix_operator_at("<@n > @>", 0, 4, true), Some(5));
         let text = "<<@flag> > 0>";
         assert_eq!(infix_operator_at(text, 1, 7, true), None);
         assert_eq!(infix_operator_at(text, 0, 9, false), Some(10));
@@ -1648,12 +1559,12 @@ mod tests {
 
     #[test]
     fn comments_preserve_locations_and_literal_contents() {
-        let text = "# line\n# inline #\n#\n跨行\n#\n当绿旗被点击 {\n [说 \"#not comment\"] # tail\n [移到 /'a#b'/]\n}\n";
+        let text = "# line\n# inline #\n#\n跨行\n#\nstart:\n 说 (\"#not comment\") # tail\n 移到 ('a#b')\n";
         let stripped = strip_comments(text).unwrap();
         assert_eq!(stripped.len(), text.len());
         assert_eq!(stripped.matches('\n').count(), text.matches('\n').count());
         assert!(stripped.contains("\"#not comment\""));
-        assert!(stripped.contains("/'a#b'/"));
+        assert!(stripped.contains("'a#b'"));
         let items = source(text).unwrap();
         let Item::Script { span, body, .. } = &items[0] else {
             panic!()
@@ -1663,42 +1574,40 @@ mod tests {
             panic!()
         };
         assert_eq!((span.line, span.column), (7, 2));
-        assert_eq!(source, "[说 \"#not comment\"]");
+        assert_eq!(source, "说 (\"#not comment\")");
         assert!(strip_comments("#\nnever closed").is_err());
     }
 
     #[test]
     fn atoms_keep_namespace_opcode_menus_and_comparisons_intact() {
         for atom in [
-            r#""自定义拓展".(张量数量)"#,
-            r#"ext::"ready".<>"#,
-            r#"ext::"add".(1, /'a/b'/, <>)"#,
-            "自定义拓展.(值)",
-            "scratch-tensor-extension.[记录 自定义拓展.min.(值)]",
-            "自定义拓展.min.<已就绪 ?>",
-            "自定义拓展.min::\"ready\".<>",
-            "scratch-tensor-extension::\"done\".hat(1)",
-            "(1-scratch-tensor-extension.(值))",
-            "(1.2-自定义拓展.min.(值))",
-            "(scratch-tensor-extension.(值)-自定义拓展.min.(值))",
-            "$global:list:\"a b\"",
+            r#"("自定义拓展".张量数量)"#,
+            r#"<ext::"ready"()>"#,
+            r#"(ext::"add"((1), 'a/b', <>))"#,
+            "(自定义拓展.值)",
+            "<自定义拓展.min.已就绪 ?>",
+            "<自定义拓展.min::\"ready\"()>",
+            "scratch-tensor-extension::\"done\"((1))",
+            "((1)-(scratch-tensor-extension.值))",
+            "((1.2)-(自定义拓展.min.值))",
+            "((scratch-tensor-extension.值)-(自定义拓展.min.值))",
+            "global:items",
             "<@布尔参数>",
             "<>",
-            "/''/",
-            "/'*'/",
-            r#"/'a/b'/"#,
-            "<$hp < 1>",
-            "<<$a > 1> 与 <不成立 <>>>",
+            "''",
+            "'*'",
+            r#"'a/b'"#,
+            "<hp < 1>",
+            "<<a > 1> 与 <不成立 <>>>",
             "(8 / 2)",
-            "(8 / (4 / 2))",
-            "[选择 1 /'*'/]",
+            "(8 / 4 / 2)",
         ] {
             assert_eq!(scan_atom(atom, 0).unwrap(), atom.len(), "{atom}");
         }
         assert_eq!(scan_atom("123 4", 0).unwrap(), 3);
         assert!(scan_atom("<(1 + 2]>", 0).is_err());
         assert_eq!(scan_atom("1.2", 0).unwrap(), 3);
-        assert_eq!(scan_atom("1-ext.(值)", 0).unwrap(), 1);
+        assert_eq!(scan_atom("1-(ext.值)", 0).unwrap(), 1);
         for name in ["", "1ext", ".ext", "-ext", "ext name", "ext/name"] {
             assert!(!is_bare_namespace(name), "{name}");
         }
@@ -1706,7 +1615,7 @@ mod tests {
 
     #[test]
     fn bare_namespace_commands_are_structural_in_strict_and_recovering_parsers() {
-        let source = "@sprite \"测试\" {\n@init {}\n当绿旗被点击 {\nscratch-tensor-extension.[记录 自定义拓展.min.(值)]\n自定义拓展.min::\"run\".[1]\n}\n自定义拓展.min.完成 \"ok\" { [说 \"ok\"] }\n}\n";
+        let source = "sprite \"测试\":\n    init:\n        pass\n    start:\n        scratch-tensor-extension.记录 (自定义拓展.min.值)\n        自定义拓展.min::\"run\"((1))\n    自定义拓展.min.完成 \"ok\":\n        说 (\"ok\")\n";
         let strict = parse(Path::new("test.sbdsl"), source).unwrap();
         let recovering = parse_recovering(Path::new("test.sbdsl"), source);
         assert!(recovering.errors.is_empty(), "{:?}", recovering.errors);
@@ -1716,11 +1625,11 @@ mod tests {
     #[test]
     fn shared_operator_recognition_preserves_menus_and_boolean_closers() {
         for source in [
-            "(8/2)",
-            "(8 / (4 / 2))",
-            "<$score>100>",
-            "<$hp<1>",
-            "<$score=100>",
+            "(8 / 2)",
+            "(8 / 4 / 2)",
+            "<score > 100>",
+            "<hp < 1>",
+            "<score = 100>",
         ] {
             let position = source
                 .find(['/', '>', '=', '<'])
@@ -1738,7 +1647,7 @@ mod tests {
                 "{source}"
             );
         }
-        for source in ["(8 / $", "(8 / (", "(8 /\n $value", "(8 /"] {
+        for source in ["(8 / ", "(8 / (", "(8 /\n value", "(8 /"] {
             let position = source.find('/').unwrap();
             assert_eq!(
                 infix_operator_at(source, 0, position, false),
@@ -1751,7 +1660,7 @@ mod tests {
                 "{source}"
             );
         }
-        for source in ["(8 /'*'/)", "(8 /'a#b'/)", "($x /'a/b'/)"] {
+        for source in ["((8) 'a/b')", "((x) 'a/b')"] {
             let position = source.find('/').unwrap();
             assert_eq!(
                 infix_operator_at(source, 0, position, true),
@@ -1759,7 +1668,7 @@ mod tests {
                 "{source}"
             );
         }
-        for source in ["<@ok> 1>", "<$score>100>", "<@ok>\n@sprite \"a\" {}"] {
+        for source in ["<@ok > 1>", "<score > 100>", "<@ok>\nsprite \"a\":"] {
             let position = source.rfind('>').unwrap();
             assert_eq!(
                 infix_operator_at(source, 0, position, true),
@@ -1771,7 +1680,7 @@ mod tests {
 
     #[test]
     fn operators_keep_nested_templates_commands_and_following_declarations() {
-        let text = "当绿旗被点击 {\n [说 <1 > 0>]\n [等待 (8 /\n  (4/2)) 秒]\n ext::\"call\".[<@ok>, 1, /'*'/, <$hp<1>]\n [说 ext.<模板 <@ok> 1>]\n}\n@var after = 1\nimport next\n";
+        let text = "start:\n 说 (<1 > 0>)\n 等待 (8 / 4 / 2) 秒\n ext::\"call\"(<@ok>, (1), '*', <hp < 1>)\n 说 <ext.模板 <@ok> (1)>\nafter = 1\nimport next\n";
         let parsed = source(text).unwrap();
         let Item::Script { body, .. } = &parsed[0] else {
             panic!()
@@ -1788,23 +1697,22 @@ mod tests {
 
     #[test]
     fn parses_declarations_initializers_stage_and_sprite_add() {
-        let items = source("import utils.math\n@var \"a b\" = -.5\n@list items = [1, \"two\", 1e-5]\n@stage { @var score }\n@sprite \"玩家\" {\n @init {}\n @global @list \"全局 列表\"\n @var hp = 100\n}\n@sprite \"玩家\" add {}\n").unwrap();
+        let items = source("import utils.math\na_b = -.5\nitems = {1, \"two\", 1e-5}\nstage:\n    score = 0\nsprite \"玩家\":\n    init:\n        pass\n    global:全局列表 = {}\n    hp = 100\nsprite \"玩家\" add:\n    pass\n").unwrap();
         assert_eq!(items.len(), 6);
         let Item::Data { name, value, .. } = &items[1] else {
             panic!()
         };
-        assert_eq!(name, "a b");
+        assert_eq!(name, "a_b");
         assert_eq!(value.as_f64(), Some(-0.5));
-        let Item::Sprite { add, .. } = &items[5] else {
-            panic!()
-        };
-        assert!(*add);
+        assert!(matches!(&items[5], Item::Sprite { add: true, .. }));
         for invalid in [
-            "@var x = (1 + 2)",
-            "@list a = [1,]",
-            "@list a = [[1]]",
-            "@list a = [$x]",
-            "@var x = true",
+            "var \"a b\" = 1",
+            "\"items\" = {}",
+            "x = (1 + 2)",
+            "a = {1,}",
+            "a = {{1}}",
+            "a = {x}",
+            "x = true",
         ] {
             assert!(source(invalid).is_err(), "{invalid}");
         }
@@ -1812,7 +1720,7 @@ mod tests {
 
     #[test]
     fn control_and_else_keep_headers_and_nested_statements() {
-        let items = source("定义自制积木 受伤 值: @n @warp {\n 如果 <$hp < @n> 那么 { [说 \"a\"] }\n 否则 {\n  重复执行 2 次 { [移动 (8 / 2) 步] }\n }\n}\n@sprite \"玩家\" { @init {}\n当绿旗被点击 { [受伤 值: 3] } }\n").unwrap();
+        let items = source("def 受伤 值: @n @warp:\n    if <hp < @n>:\n        说 (\"a\")\n    else:\n        loop 2:\n            移动 (8 / 2) 步\nsprite \"玩家\":\n    init:\n        pass\n    start:\n        受伤 值: (3)\n").unwrap();
         let Item::Procedure { header, body, .. } = &items[0] else {
             panic!()
         };
@@ -1830,28 +1738,29 @@ mod tests {
     #[test]
     fn strict_context_and_sibling_boundaries() {
         for invalid in [
-            "[移动 1 步]",
-            "重复执行 {}",
-            "@sprite \"a\" { @init {}\nimport x }",
-            "@stage { @stage {} }",
-            "@sprite \"a\" { @init {}\n@sprite \"b\" { @init {} } }",
-            "当绿旗被点击 { @var x }",
-            "当绿旗被点击 { 当角色被点击 {} }",
-            "当绿旗被点击 { [移动 1 步] [移动 2 步] }",
-            "@var a @var b",
-            "当绿旗被点击 { 重复执行 {} 否则 {} }",
-            "当绿旗被点击 { [说 \"x\"]",
-            "@sprite \"a\" { @init {} } @sprite \"b\" { @init {} }",
+            "移动 (1) 步",
+            "loop 2:\n    pass",
+            "sprite \"a\":\n    init:\n        pass\n    import x",
+            "stage:\n    stage:\n        pass",
+            "sprite \"a\":\n    init:\n        pass\n    sprite \"b\":\n        init:\n            pass",
+            "start:\n    var x",
+            "start:\n    当角色被点击:\n        pass",
+            "var a var b",
+            "start:\n    loop 2:\n        pass\n    else:\n        pass",
+            "start:\n    [说 \"x\"",
         ] {
             assert!(source(invalid).is_err(), "{invalid}");
         }
-        assert!(source("@sprite \"a\" { @init {}\n当绿旗被点击 { [移动 1 步] } }").is_ok());
-        assert!(source("@stage { import utils.math\n@sprite \"a\" { @init {} }\n}").is_ok());
+        assert!(
+            source("sprite \"a\":\n    init:\n        pass\n    start:\n        移动 (1) 步")
+                .is_ok()
+        );
+        assert!(source("stage:\n    import utils.math\n    sprite \"a\":\n        init:\n            pass\n").is_ok());
     }
 
     #[test]
     fn header_first_slot_and_explicit_commands_are_structural() {
-        let items = source("@sprite \"a\" {\n @init {}\n ext.(x 坐标) 达标 {\n  ext::\"send\".[1, /'a/b'/, <true>]\n }\n ext::\"event\".hat(/'space'/) { [说 \"x\"] }\n}").unwrap();
+        let items = source("sprite \"a\":\n    init:\n        pass\n    ext.(x 坐标) 达标:\n        ext::\"send\"((1), 'a/b', <true>)\n    ext::\"event\"('space'):\n        说 (\"x\")\n").unwrap();
         let Item::Sprite { items, .. } = &items[0] else {
             panic!()
         };
@@ -1864,9 +1773,9 @@ mod tests {
 
     #[test]
     fn sprite_init_uses_json_escapes_and_preserves_dsl_comment_spans() {
-        let text = r##"@sprite "玩家" {
+        let text = r##"sprite "玩家":
     # Leading comments do not count as declarations.
-    @init # inline comment # {
+    init: # inline comment #
         "x": -100,
         "y": 2e1,
         "visible": false,
@@ -1880,10 +1789,9 @@ mod tests {
             "bitmapResolution": 2
         }],
         "sounds": [{"name": "音效", "path": "../assets/sound.wav"}]
-    }
-    @var hp = 100
-}
-@sprite "玩家" add { @var hp = 50 }
+    hp = 100
+sprite "玩家" add:
+    hp = 50
 "##;
         let cleaned = strip_comments(text).unwrap();
         assert_eq!(cleaned.len(), text.len());
@@ -1909,7 +1817,7 @@ mod tests {
         let Item::Data { span, .. } = &body[0] else {
             panic!()
         };
-        assert_eq!((span.line, span.column), (18, 5));
+        assert_eq!((span.line, span.column), (17, 5));
         assert!(matches!(
             &items[1],
             Item::Sprite {
@@ -1919,7 +1827,7 @@ mod tests {
             }
         ));
 
-        let defaults = source("@sprite \"a\" { @init {} }").unwrap();
+        let defaults = source("sprite \"a\":\n    init:\n        pass").unwrap();
         let Item::Sprite {
             init: Some(init),
             items,
@@ -1940,28 +1848,28 @@ mod tests {
     #[test]
     fn sprite_init_is_required_first_unique_and_creation_only() {
         for invalid in [
-            "@sprite \"a\" {}",
-            "@sprite \"a\" { # only a comment\n}",
-            "@sprite \"a\" { @var x\n@init {} }",
-            "@sprite \"a\" { @init {}\n@init {} }",
-            "@sprite \"a\" add { @init {} }",
-            "@init {}",
-            "@stage { @init {} }",
-            "当绿旗被点击 { @init {} }",
-            "定义自制积木 p { @init {} }",
-            "@sprite \"a\" { @init [] }",
-            "@sprite \"a\" { @init {} @var x }",
-            "@sprite \"a\" { @init {}\n当绿旗被点击 { @init {} } }",
+            "sprite \"a\":\n    pass",
+            "sprite \"a\":\n    # only a comment\n",
+            "sprite \"a\":\n    var x\n    init:\n        pass",
+            "sprite \"a\":\n    init:\n        pass\n    init:\n        pass",
+            "sprite \"a\" add:\n    init:\n        pass",
+            "init:\n    pass",
+            "stage:\n    init:\n        pass",
+            "start:\n    init:\n        pass",
+            "def p:\n    init:\n        pass",
+            "sprite \"a\":\n    init ",
+            "sprite \"a\":\n    init:\n        pass var x",
+            "sprite \"a\":\n    init:\n        pass\n    start:\n        init:\n            pass",
         ] {
             assert!(source(invalid).is_err(), "{invalid}");
         }
-        assert!(source("@sprite \"a\" add {}").is_ok());
+        assert!(source("sprite \"a\" add:\n    pass").is_ok());
     }
 
     #[test]
     fn sprite_init_accepts_bare_fields_newline_separators_and_trailing_commas() {
-        let text = r##"@sprite "玩家" {
- @init {
+        let text = r##"sprite "玩家":
+ init:
   x: -100
   y: 2e1
   visible: false # initial state
@@ -1973,13 +1881,10 @@ mod tests {
     rotationCenterX: 12.5
    }
   ]
- }
- @var hp = 100
- 当绿旗被点击 {
-  [将 $hp
-   设为 100]
- }
-}
+ hp = 100
+ start:
+  hp = (
+   100)
 "##;
         let items = source(text).unwrap();
         let Item::Sprite {
@@ -1997,7 +1902,7 @@ mod tests {
             panic!()
         };
         assert!(
-            matches!(&body[0], Statement::Command { source, .. } if source == "[将 $hp\n   设为 100]")
+            matches!(&body[0], Statement::Command { source, .. } if source == "hp = (\n   100)")
         );
         assert!(
             parse_recovering(Path::new("test.sbdsl"), text)
@@ -2008,8 +1913,7 @@ mod tests {
 
     #[test]
     fn init_notation_errors_keep_original_spans_and_recovery_children() {
-        let text =
-            "@sprite \"角色 😀\" {\n @init {\n  x: 1\n  x: 2\n }\n @var hp = 100\n}\nimport next\n";
+        let text = "sprite \"角色 😀\":\n init:\n  x: 1\n  x: 2\n hp = 100\nimport next\n";
         let error = source(text).unwrap_err();
         assert!(error.0.contains("duplicate field"));
         assert_eq!(
@@ -2035,7 +1939,7 @@ mod tests {
             r#"{"x": 01}"#,
             r#"{"x": +1}"#,
             r#"{"x": 1e999}"#,
-            r#"{"x": $hp}"#,
+            r#"{"x": hp}"#,
             r#"{"x": (1 + 2)}"#,
             r#"{"x": 1 "y": 2}"#,
             r#"{"x": 1, "x": 2}"#,
@@ -2058,7 +1962,7 @@ mod tests {
             r#"{"sounds": [{"name":"x", "path":"a.wav", "rotationCenterX":1}]}"#,
             r#"{"sounds": [{"name":"x", "path":"a.wav", "bitmapResolution":1}]}"#,
         ] {
-            let text = format!("@sprite \"a\" {{ @init {json} }}");
+            let text = format!("sprite \"a\":\n init:\n  {}", &json[1..json.len() - 1]);
             assert!(source(&text).is_err(), "{json}");
         }
         for field in [
@@ -2071,7 +1975,7 @@ mod tests {
             "costumes",
             "sounds",
         ] {
-            let text = format!("@sprite \"a\" {{ @init {{\"{field}\":null}} }}");
+            let text = format!("sprite \"a\":\n init:\n  \"{field}\": null");
             assert!(source(&text).is_err(), "null {field}");
         }
         for field in [
@@ -2086,7 +1990,7 @@ mod tests {
                 "path" => r#"{"name":"a","path":null}"#.to_string(),
                 _ => format!(r#"{{"name":"a","path":"a.svg","{field}":null}}"#),
             };
-            let text = format!("@sprite \"a\" {{ @init {{\"costumes\":[{json}]}} }}");
+            let text = format!("sprite \"a\":\n init:\n  \"costumes\": [{json}]");
             assert!(source(&text).is_err(), "null asset {field}");
         }
     }
@@ -2094,22 +1998,19 @@ mod tests {
     #[test]
     fn json_escape_rules_do_not_leak_into_dsl_and_json_errors_have_locations() {
         for invalid in [
-            r#"@var x = "\t""#,
-            r#"@sprite "a" { @init {}
-@var x = "\u0061" }"#,
-            r#"定义自制积木 p @init { [说 "\t"] }"#,
+            r#"x = "\t""#,
+            "sprite \"a\":\n    init:\n        pass\n    x = \"\\u0061\"",
+            "def p @init:\n    说 (\"\\t\")",
         ] {
             assert!(source(invalid).is_err(), "{invalid}");
         }
-        // A parameter named @init in a procedure header is not an init block.
-        assert!(source("定义自制积木 p @init { [移到 /'#'/] }").is_ok());
-        let error =
-            source("@sprite \"a\" {\n @init {\n  #中文注释\n  \"x\": null\n }\n}").unwrap_err();
+        assert!(source("def p @init:\n    移到 ('#')").is_ok());
+        let error = source("sprite \"a\":\n init:\n  #中文注释\n  \"x\": null\n").unwrap_err();
         assert!(error.to_string().starts_with("test.sbdsl:4:"), "{error}");
         for invalid in [
-            "@sprite \"a\" { @init {\"rotationStyle\":\"a\nb\"} }",
-            "@sprite \"a\" { @init {\"costumes\":[} }",
-            "@sprite \"a\" { @init {\"costumes\":[",
+            "sprite \"a\":\n    init:\n        rotationStyle: \"a\nb\"",
+            "sprite \"a\":\n    init:\n        costumes: [}",
+            "sprite \"a\":\n    init:\n        costumes: [",
         ] {
             assert!(source(invalid).is_err(), "{invalid}");
         }
@@ -2117,17 +2018,16 @@ mod tests {
 
     #[test]
     fn multiline_expressions_and_comment_columns_use_original_text() {
-        let items = source("当绿旗被点击 {\n#中文# [说 (连接\n \"a\" 和 \"b\")]\n}\n").unwrap();
+        let items = source("start:\n #中文# 说(连接\n (\"a\") 和 (\"b\"))\n").unwrap();
         let Item::Script { body, .. } = &items[0] else {
             panic!()
         };
         let Statement::Command { span, source } = &body[0] else {
             panic!()
         };
-        assert_eq!((span.line, span.column), (2, 6));
+        assert_eq!((span.line, span.column), (2, 7));
         assert!(source.contains('\n'));
-        let error =
-            super::parse(Path::new("例子.sbdsl"), "\n当绿旗被点击 { [说 \"\\q\"] }").unwrap_err();
-        assert!(error.to_string().starts_with("例子.sbdsl:2:"));
+        let error = super::parse(Path::new("例子.sbdsl"), "\nstart:\n 说 (\"\\q\")").unwrap_err();
+        assert!(error.to_string().starts_with("例子.sbdsl:3:"));
     }
 }

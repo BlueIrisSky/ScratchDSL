@@ -1,0 +1,3 @@
+entry: "./extension-controls.sbdsl"
+extensions: ["./control-extension.js" as "flow"]
+output: "../../../target/validation/outputs/extension-controls.sb3"

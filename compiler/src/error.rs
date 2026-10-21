@@ -20,16 +20,22 @@ impl Error {
     pub fn span(&self) -> Option<&Span> {
         self.1.as_ref()
     }
-    pub fn in_file(self, path: &Path) -> Self {
-        self.at(&Span {
-            file: path.display().to_string(),
-            line: 1,
-            column: 1,
-            ..Span::default()
-        })
+    pub fn in_file(mut self, path: &Path) -> Self {
+        if self.1.is_none() {
+            self.1 = Some(Span {
+                file: path.display().to_string(),
+                line: 1,
+                column: 1,
+                ..Span::default()
+            });
+        }
+        self
     }
-    pub fn at_source(self, path: &Path, source: &str, start: usize, end: usize) -> Self {
-        self.at(&Span::from_source(path, source, start, end))
+    pub fn at_source(mut self, path: &Path, source: &str, start: usize, end: usize) -> Self {
+        if self.1.is_none() {
+            self.1 = Some(Span::from_source(path, source, start, end));
+        }
+        self
     }
 }
 impl fmt::Display for Error {

@@ -1,13 +1,13 @@
 src/**
 test/**
 node_modules/**
+server/**
+!server/sbdsl.exe
+!server/THIRD_PARTY_NOTICES.txt
 dist/test/**
 .vscode-test/**
 build.mjs
 tsconfig.json
 package-lock.json
 *.vsix
-**/*.map
-**/*.ts
 .gitignore
-**/.gitkeep

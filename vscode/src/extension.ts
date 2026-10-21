@@ -62,7 +62,7 @@ async function commandInput(resource?: vscode.Uri): Promise<{ input: string; cwd
     throw new Error('请先将入口或配置保存为本地文件。');
   }
   const active = document?.uri.scheme === 'file' &&
-    (document.languageId === 'sbdsl' || isConfig(document.uri))
+    ['sbdsl', 'sbdsl-build'].includes(document.languageId)
     ? document : undefined;
   const selectedConfig = active && isConfig(active.uri)
     ? active.uri.fsPath : undefined;
@@ -75,15 +75,14 @@ async function commandInput(resource?: vscode.Uri): Promise<{ input: string; cwd
   folder ??= !active ? folders[0] : undefined;
   if (!active && !folder) throw new Error('请先打开 .sbdsl、sbdsl.buildsb 文件或工程目录。');
   const start = active ? path.dirname(active.uri.fsPath) : folder!.uri.fsPath;
-  const beforeSaveConfig = selectedConfig ?? await nearestConfig(start);
-  const saveRoot = folder?.uri.fsPath ?? (beforeSaveConfig ? path.dirname(beforeSaveConfig) : start);
+  const config = selectedConfig ?? await nearestConfig(start);
+  const saveRoot = folder?.uri.fsPath ?? (config ? path.dirname(config) : start);
   const dirty = vscode.workspace.textDocuments.filter(doc =>
     doc.isDirty && doc.uri.scheme === 'file' &&
-    (inside(doc.uri.fsPath, saveRoot) || doc.uri.fsPath === beforeSaveConfig));
+    (inside(doc.uri.fsPath, saveRoot) || doc.uri.fsPath === config));
   for (const doc of dirty) {
     if (!(await doc.save())) throw new Error(`文件未保存，已取消：${doc.uri.fsPath}`);
   }
-  const config = selectedConfig ?? await nearestConfig(start);
   if (config) return { input: config, cwd: path.dirname(config) };
   if (active?.languageId === 'sbdsl') return { input: active.uri.fsPath, cwd: start };
   throw new Error('未找到 sbdsl.buildsb；请打开要构建的 .sbdsl 入口文件。');
@@ -92,9 +91,8 @@ async function commandInput(resource?: vscode.Uri): Promise<{ input: string; cwd
 export async function activate(context: vscode.ExtensionContext): Promise<{ whenReady(): Promise<void> }> {
   const output = vscode.window.createOutputChannel('ScratchDSL', { log: true });
   context.subscriptions.push(output);
-  const watcher = vscode.workspace.createFileSystemWatcher('**/*.{sbdsl,js}');
-  const configWatcher = vscode.workspace.createFileSystemWatcher('**/*.buildsb');
-  context.subscriptions.push(watcher, configWatcher);
+  const watcher = vscode.workspace.createFileSystemWatcher('**/*.{sbdsl,buildsb,js}');
+  context.subscriptions.push(watcher);
 
   const restart = (): Promise<void> => {
     transition = transition.catch(() => undefined).then(async () => {
@@ -115,11 +113,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ when
         documentSelector: [
           { scheme: 'file', language: 'sbdsl' },
           { scheme: 'untitled', language: 'sbdsl' },
-          { scheme: 'file', language: 'sbdsl-build' },
-          { scheme: 'file', pattern: '**/*.buildsb' }
+          { scheme: 'file', language: 'sbdsl-build' }
         ],
         initializationOptions: { allowExtensions: vscode.workspace.isTrusted },
-        synchronize: { fileEvents: [watcher, configWatcher] },
+        synchronize: { fileEvents: watcher },
         outputChannel: output,
         markdown: { isTrusted: false }
       });

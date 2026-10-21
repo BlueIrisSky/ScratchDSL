@@ -5,28 +5,20 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Span {
     pub file: String,
     pub line: usize,
     pub column: usize,
     /// Half-open UTF-8 byte range in the original, unmodified source.
-    #[serde(default)]
     pub start: usize,
-    #[serde(default)]
     pub end: usize,
 }
 
 impl Span {
     pub fn from_source(path: &Path, source: &str, start: usize, end: usize) -> Self {
-        let mut start = start.min(source.len());
-        while !source.is_char_boundary(start) {
-            start -= 1;
-        }
-        let mut end = end.max(start).min(source.len());
-        while !source.is_char_boundary(end) {
-            end -= 1;
-        }
+        let start = source.floor_char_boundary(start);
+        let end = source.floor_char_boundary(end).max(start);
         let prefix = &source[..start];
         Self {
             file: path.display().to_string(),
@@ -109,14 +101,14 @@ impl SpriteInit {
             ("direction", self.direction),
         ] {
             if !value.is_finite() {
-                return Err(crate::Error::new(format!("@init {name} must be finite")));
+                return Err(crate::Error::new(format!("init {name} must be finite")));
             }
         }
         if self.size <= 0. {
-            return Err(crate::Error::new("@init size must be positive"));
+            return Err(crate::Error::new("init size must be positive"));
         }
         if !["all around", "left-right", "don't rotate"].contains(&self.rotation_style.as_str()) {
-            return Err(crate::Error::new("invalid @init rotationStyle"));
+            return Err(crate::Error::new("invalid init rotationStyle"));
         }
         for (kind, assets) in [("costumes", &self.costumes), ("sounds", &self.sounds)] {
             let mut names = BTreeSet::new();
@@ -132,18 +124,18 @@ impl SpriteInit {
                 }
                 if asset.name.is_empty() {
                     return Err(crate::Error::new(format!(
-                        "@init {kind} names cannot be empty"
+                        "init {kind} names cannot be empty"
                     )));
                 }
                 if !names.insert(&asset.name) {
                     return Err(crate::Error::new(format!(
-                        "duplicate @init {kind} name: {}",
+                        "duplicate init {kind} name: {}",
                         asset.name
                     )));
                 }
                 if asset.path.as_os_str().is_empty() {
                     return Err(crate::Error::new(format!(
-                        "@init {kind} resource path cannot be empty"
+                        "init {kind} resource path cannot be empty"
                     )));
                 }
                 if asset.bitmap_resolution == Some(0) {
@@ -197,6 +189,12 @@ pub enum Item {
 
 #[derive(Debug, Clone)]
 pub enum Statement {
+    ListAssignment {
+        name: String,
+        global: bool,
+        values: Vec<Value>,
+        span: Span,
+    },
     Command {
         source: String,
         span: Span,
@@ -207,9 +205,14 @@ pub enum Statement {
         else_body: Option<Vec<Statement>>,
         span: Span,
     },
+    ExtensionControl {
+        header: String,
+        branches: Vec<Vec<Statement>>,
+        span: Span,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Shape {
     Command,
     Reporter,
@@ -218,7 +221,7 @@ pub enum Shape {
     Control,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ArgType {
     Any,
     String,
@@ -231,27 +234,27 @@ pub enum ArgType {
     Broadcast,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Storage {
     Input,
     Field,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Shadow {
     pub opcode: String,
     pub field: String,
     pub primitive: Option<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Menu {
     /// None denotes a dynamic menu; pairs are (display text, stored value).
     pub items: Option<Vec<(String, String)>>,
     pub accept_reporters: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Slot {
     pub name: String,
     pub arg_type: ArgType,
@@ -261,13 +264,13 @@ pub struct Slot {
     pub menu: Option<Menu>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Token {
     Literal(String),
     Slot(Slot),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Template {
     pub opcode: String,
     pub shape: Shape,
@@ -275,6 +278,8 @@ pub struct Template {
     pub extension_id: Option<String>,
     pub local_opcode: Option<String>,
     pub tokens: Vec<Token>,
+    /// Number of ordered C-block substacks. Zero for blocks without bodies.
+    pub branch_count: usize,
     pub sprite_only: bool,
     pub stage_only: bool,
     /// Stable source-level procedure identity. None for builtins/extensions.
@@ -309,7 +314,7 @@ impl Template {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Expr {
     Number(f64),
     String(String),
@@ -328,7 +333,7 @@ pub enum Expr {
     Call(Box<Invocation>),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Invocation {
     pub template: Template,
     pub args: Vec<Expr>,

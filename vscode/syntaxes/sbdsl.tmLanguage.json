@@ -7,16 +7,22 @@
       "include": "#comments"
     },
     {
-      "include": "#init"
+      "include": "#indented-init"
+    },
+    {
+      "include": "#invalid-data-assignment"
+    },
+    {
+      "include": "#retired-declaration"
+    },
+    {
+      "include": "#list-assignment"
+    },
+    {
+      "include": "#assignment"
     },
     {
       "include": "#sprite"
-    },
-    {
-      "include": "#var-declaration"
-    },
-    {
-      "include": "#list-declaration"
     },
     {
       "include": "#import"
@@ -26,23 +32,27 @@
     },
     {
       "name": "storage.modifier.sbdsl",
-      "match": "@(?:global|warp)\\b"
+      "match": "(?<![\\p{L}\\p{Nd}_$])@warp\\b"
     },
     {
       "name": "keyword.control.sbdsl",
-      "match": "@(?:stage|sprite|init|var|list)\\b|\\badd\\b"
+      "match": "(?<![\\p{L}\\p{Nd}_$@])(?:stage|sprite|init|add|pass)\\b(?!:)"
     },
     {
       "include": "#control"
     },
     {
-      "include": "#body"
-    },
-    {
-      "include": "#values"
+      "include": "#extension-control"
     },
     {
       "include": "#event"
+    },
+    {
+      "include": "#command"
+    },
+    {
+      "name": "punctuation.section.block.begin.sbdsl",
+      "match": ":(?=[ \\t]*(?:#.*)?$)"
     },
     {
       "name": "punctuation.section.sbdsl",
@@ -50,6 +60,23 @@
     }
   ],
   "repository": {
+    "extension-control": {
+      "name": "meta.control.extension.sbdsl",
+      "begin": "^[ \\t]*(?=(?:[\\p{L}_][\\p{L}\\p{Nd}_.-]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")(?:\\.|::).*:[ \\t]*(?:#.*)?$)",
+      "end": "(?=:[ \\t]*(?:#.*)?$|$)",
+      "patterns": [
+        {
+          "include": "#list-command-values"
+        },
+        {
+          "include": "#values"
+        },
+        {
+          "name": "support.function.command.sbdsl",
+          "match": "[^\\s\\[\\](){}<>\"\\'/$@#,+*=]+|[+*=]"
+        }
+      ]
+    },
     "dsl-escapes": {
       "patterns": [
         {
@@ -86,14 +113,9 @@
       "patterns": [
         {
           "name": "meta.menu.sbdsl",
-          "begin": "/(?=')",
-          "end": "/|$",
-          "patterns": [
-            {
-              "include": "#menu-string"
-            }
-          ],
-          "contentName": "string.quoted.other.menu.sbdsl",
+          "contentName": "string.quoted.single.menu.sbdsl",
+          "begin": "'",
+          "end": "'|$",
           "beginCaptures": {
             "0": {
               "name": "punctuation.definition.menu.begin.sbdsl"
@@ -103,39 +125,28 @@
             "0": {
               "name": "punctuation.definition.menu.end.sbdsl"
             }
-          }
+          },
+          "patterns": [
+            {
+              "include": "#menu-escapes"
+            }
+          ]
         }
       ]
     },
     "references": {
       "patterns": [
         {
-          "name": "variable.other.array.sbdsl",
-          "begin": "\\$(?:global:)?list:\"",
-          "end": "\"|$",
-          "patterns": [
-            {
-              "include": "#dsl-escapes"
-            }
-          ]
+          "name": "invalid.illegal.reference.sbdsl",
+          "match": "\\$(?:global:)?(?:list:)?(?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"|\"[^\\r\\n]*)?"
         },
         {
-          "name": "variable.other.array.sbdsl",
-          "match": "\\$(?:global:)?list:[\\p{L}_][\\p{L}\\p{Nd}_]*"
+          "name": "invalid.illegal.reference.sbdsl",
+          "match": "(?<![\\p{L}\\p{Nd}_$@:])(?:(?:global:list:|list:|var:)(?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"|\"[^\\r\\n]*)|global:\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")"
         },
         {
           "name": "variable.other.readwrite.sbdsl",
-          "begin": "\\$(?:global:)?\"",
-          "end": "\"|$",
-          "patterns": [
-            {
-              "include": "#dsl-escapes"
-            }
-          ]
-        },
-        {
-          "name": "variable.other.readwrite.sbdsl",
-          "match": "\\$(?:global:)?[\\p{L}_][\\p{L}\\p{Nd}_]*"
+          "match": "(?<![\\p{L}\\p{Nd}_$@:])global:[\\p{L}_][\\p{L}\\p{Nd}_]*(?![\\p{L}\\p{Nd}_:])"
         },
         {
           "name": "variable.parameter.sbdsl",
@@ -184,7 +195,7 @@
         },
         {
           "name": "keyword.operator.sbdsl",
-          "match": "(?<![+*/=<-])(?:\\+(?!\\*)|-(?!\\*)|\\*(?!\\*)|=(?!\\*))|\\bmod\\b"
+          "match": "(?<![+*/=<-])(?:\\+(?!\\*)|-(?!\\*)|\\*(?!\\*)|=(?!\\*))"
         }
       ]
     },
@@ -207,7 +218,7 @@
           }
         },
         {
-          "match": "(::)(\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")(?=\\.)",
+          "match": "(::)(\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")(?=\\()",
           "captures": {
             "1": {
               "name": "punctuation.separator.namespace.sbdsl"
@@ -225,10 +236,6 @@
         {
           "name": "punctuation.separator.namespace.sbdsl",
           "match": "\\.(?![0-9])"
-        },
-        {
-          "name": "keyword.control.event.sbdsl",
-          "match": "\\bhat(?=\\()"
         }
       ]
     },
@@ -236,6 +243,9 @@
       "patterns": [
         {
           "include": "#comments"
+        },
+        {
+          "include": "#retired-delimiters"
         },
         {
           "include": "#namespaces"
@@ -262,9 +272,6 @@
           "include": "#operators"
         },
         {
-          "include": "#command"
-        },
-        {
           "include": "#infix-reporter"
         },
         {
@@ -281,32 +288,25 @@
     },
     "command": {
       "name": "meta.block.command.sbdsl",
-      "begin": "\\[",
-      "end": "\\]|(?=[{}])|(?=^[ \\t]*(?:\\[|@(?:stage|init)\\b(?=[ \\t]*\\{)|@sprite\\b(?=[ \\t]+\")|@(?:var|list)\\b(?=[ \\t]+[\\p{L}_\"])|@global\\b(?=[ \\t]+@(?:var|list)\\b)|import\\b|定义自制积木|当|重复执行|循环|如果|否则))",
-      "beginCaptures": {
-        "0": {
-          "name": "punctuation.definition.command.begin.sbdsl"
-        }
-      },
-      "endCaptures": {
-        "0": {
-          "name": "punctuation.definition.command.end.sbdsl"
-        }
-      },
+      "begin": "(?=[^\\s:})])",
+      "end": "(?=:[ \\t]*(?:#.*)?$|$)",
       "patterns": [
+        {
+          "include": "#list-command-values"
+        },
         {
           "include": "#values"
         },
         {
           "name": "support.function.command.sbdsl",
-          "match": "[^\\s\\[\\](){}<>\"/$@#,+*=]+|[+*=]|<(?!\\*)|>(?!\\*)"
+          "match": "[^\\s\\[\\](){}<>\"\\'/$@#,+*=]+|[+*=]"
         }
       ]
     },
     "reporter": {
       "name": "meta.block.reporter.sbdsl",
       "begin": "\\(",
-      "end": "\\)|(?=[{}])|(?=^[ \\t]*(?:\\[|@(?:stage|init)\\b(?=[ \\t]*\\{)|@sprite\\b(?=[ \\t]+\")|@(?:var|list)\\b(?=[ \\t]+[\\p{L}_\"])|@global\\b(?=[ \\t]+@(?:var|list)\\b)|import\\b|定义自制积木|当|重复执行|循环|如果|否则))",
+      "end": "\\)|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
       "beginCaptures": {
         "0": {
           "name": "punctuation.definition.reporter.begin.sbdsl"
@@ -319,18 +319,32 @@
       },
       "patterns": [
         {
+          "include": "#known-reporters"
+        },
+        {
+          "match": "(?<=\\()((?:global:)?[\\p{L}_][\\p{L}\\p{Nd}_]*)(?=[ \\t]*\\))",
+          "captures": {
+            "1": {
+              "name": "variable.other.readwrite.sbdsl"
+            }
+          }
+        },
+        {
+          "include": "#list-reporter-value"
+        },
+        {
           "include": "#values"
         },
         {
           "name": "support.function.reporter.sbdsl",
-          "match": "[^\\s\\[\\](){}<>\"/$@#,+*=]+|[+*=]|<(?!\\*)|>(?!\\*)"
+          "match": "[^\\s\\[\\](){}<>\"'/$@#,+*=]+|[+*=]|<(?!\\*)|>(?!\\*)"
         }
       ]
     },
     "boolean": {
       "name": "meta.block.boolean.sbdsl",
       "begin": "<(?!\\*)",
-      "end": ">(?!\\*)|(?=[{}])|(?=^[ \\t]*(?:\\[|@(?:stage|init)\\b(?=[ \\t]*\\{)|@sprite\\b(?=[ \\t]+\")|@(?:var|list)\\b(?=[ \\t]+[\\p{L}_\"])|@global\\b(?=[ \\t]+@(?:var|list)\\b)|import\\b|定义自制积木|当|重复执行|循环|如果|否则))",
+      "end": ">(?!\\*)|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
       "beginCaptures": {
         "0": {
           "name": "punctuation.definition.boolean.begin.sbdsl"
@@ -343,11 +357,14 @@
       },
       "patterns": [
         {
-          "include": "#comparison-left"
+          "include": "#namespaces"
         },
         {
           "name": "constant.language.boolean.sbdsl",
           "match": "\\b(?:true|false)\\b"
+        },
+        {
+          "include": "#comparison-left"
         },
         {
           "include": "#logical-operators"
@@ -357,83 +374,14 @@
         },
         {
           "name": "support.function.boolean.sbdsl",
-          "match": "[^\\s\\[\\](){}<>\"/$@#,+*=]+|[+*=]|<(?!\\*)|>(?!\\*)"
-        }
-      ]
-    },
-    "var-declaration": {
-      "name": "meta.declaration.var.sbdsl",
-      "begin": "(@var)\\b[ \\t]+((?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"))",
-      "end": "(?=$|[{}])",
-      "beginCaptures": {
-        "1": {
-          "name": "storage.type.sbdsl"
-        },
-        "2": {
-          "name": "variable.other.readwrite.sbdsl",
-          "patterns": [
-            {
-              "include": "#dsl-escapes"
-            }
-          ]
-        }
-      },
-      "patterns": [
-        {
-          "include": "#comments"
-        },
-        {
-          "include": "#strings"
-        },
-        {
-          "include": "#numbers"
-        },
-        {
-          "name": "keyword.operator.assignment.sbdsl",
-          "match": "="
-        }
-      ]
-    },
-    "list-declaration": {
-      "name": "meta.declaration.list.sbdsl",
-      "begin": "(@list)\\b[ \\t]+((?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"))",
-      "end": "(?=$|[{}])",
-      "beginCaptures": {
-        "1": {
-          "name": "storage.type.sbdsl"
-        },
-        "2": {
-          "name": "variable.other.array.sbdsl",
-          "patterns": [
-            {
-              "include": "#dsl-escapes"
-            }
-          ]
-        }
-      },
-      "patterns": [
-        {
-          "include": "#comments"
-        },
-        {
-          "include": "#strings"
-        },
-        {
-          "include": "#numbers"
-        },
-        {
-          "include": "#list-initializer"
-        },
-        {
-          "name": "keyword.operator.assignment.sbdsl",
-          "match": "="
+          "match": "[^\\s\\[\\](){}<>\"'/$@#,+*=]+|[+*=]|<(?!\\*)|>(?!\\*)"
         }
       ]
     },
     "list-initializer": {
       "name": "meta.sequence.list.sbdsl",
-      "begin": "\\[",
-      "end": "\\]|(?=[{}])|(?=^[ \\t]*(?:\\[|@(?:stage|init)\\b(?=[ \\t]*\\{)|@sprite\\b(?=[ \\t]+\")|@(?:var|list)\\b(?=[ \\t]+[\\p{L}_\"])|@global\\b(?=[ \\t]+@(?:var|list)\\b)|import\\b|定义自制积木|当|重复执行|循环|如果|否则))",
+      "begin": "\\{",
+      "end": "\\}|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
       "beginCaptures": {
         "0": {
           "name": "punctuation.definition.list.begin.sbdsl"
@@ -462,8 +410,8 @@
     },
     "sprite": {
       "name": "meta.declaration.sprite.sbdsl",
-      "begin": "(@sprite)\\b",
-      "end": "(?=\\{|$)",
+      "begin": "(?<![\\p{L}\\p{Nd}_@])(sprite)\\b",
+      "end": "(?=:|$)",
       "beginCaptures": {
         "1": {
           "name": "storage.type.sbdsl"
@@ -520,8 +468,8 @@
     },
     "procedure": {
       "name": "meta.declaration.function.sbdsl",
-      "begin": "(定义自制积木)(?=\\s|$)",
-      "end": "(?=\\{|$)",
+      "begin": "(def)(?=\\s|$)",
+      "end": "(?=:[ \\t]*(?:#.*)?$|$)",
       "beginCaptures": {
         "1": {
           "name": "keyword.declaration.function.sbdsl"
@@ -549,8 +497,8 @@
     },
     "control": {
       "name": "meta.control.sbdsl",
-      "begin": "(重复执行直到|重复执行|循环|如果|否则)",
-      "end": "(?=\\{|$)",
+      "begin": "((?:if|elif|else|loop|while)\\b)",
+      "end": "(?=:[ \\t]*(?:#.*)?$|$)",
       "beginCaptures": {
         "1": {
           "name": "keyword.control.sbdsl"
@@ -561,57 +509,29 @@
           "include": "#values"
         },
         {
+          "name": "constant.language.boolean.sbdsl",
+          "match": "\\b(?:true|false)\\b"
+        },
+        {
+          "include": "#bare-name"
+        },
+        {
           "name": "keyword.control.sbdsl",
-          "match": "[^\\s{}\\[\\]()<>\"/$@#,+*=]+"
+          "match": "[^\\s{}\\[\\]()<>\"/$@#,:+*=]+"
         }
       ]
     },
     "event": {
       "name": "meta.event.sbdsl",
-      "begin": "(?=[^\\s{}\\[\\]()<>\"/$@#])",
-      "end": "(?=\\{|$)",
+      "begin": "(?=\\S.*:[ \\t]*(?:#.*)?$)",
+      "end": "(?=:[ \\t]*(?:#.*)?$|$)",
       "patterns": [
         {
           "include": "#values"
         },
         {
           "name": "keyword.control.event.sbdsl",
-          "match": "[^\\s{}\\[\\]()<>\"/$@#,+*=]+"
-        }
-      ]
-    },
-    "body": {
-      "name": "meta.block.sbdsl",
-      "begin": "\\{",
-      "end": "\\}",
-      "beginCaptures": {
-        "0": {
-          "name": "punctuation.section.block.begin.sbdsl"
-        }
-      },
-      "endCaptures": {
-        "0": {
-          "name": "punctuation.section.block.end.sbdsl"
-        }
-      },
-      "patterns": [
-        {
-          "include": "$self"
-        }
-      ]
-    },
-    "init": {
-      "name": "meta.embedded.block.buildsb.sbdsl",
-      "begin": "(@init)\\b",
-      "beginCaptures": {
-        "1": {
-          "name": "keyword.control.sbdsl"
-        }
-      },
-      "end": "(?<=\\})|$",
-      "patterns": [
-        {
-          "include": "source.sbdsl-build#json-values"
+          "match": "[^\\s{}\\[\\]()<>\"'/$@#,:+*=]+"
         }
       ]
     },
@@ -620,8 +540,8 @@
     },
     "infix-reporter": {
       "name": "meta.block.reporter.sbdsl",
-      "begin": "\\((?=[ \\t]*(?:[$@\"/(0-9.+-]|$))",
-      "end": "\\)|(?=[{}])|(?=^[ \\t]*(?:\\[|@(?:stage|init)\\b(?=[ \\t]*\\{)|@sprite\\b(?=[ \\t]+\")|@(?:var|list)\\b(?=[ \\t]+[\\p{L}_\"])|@global\\b(?=[ \\t]+@(?:var|list)\\b)|import\\b|定义自制积木|当|重复执行|循环|如果|否则))",
+      "begin": "\\((?=[ \\t]*(?:[@\\\"\\'(0-9.+-]|global:|[\\p{L}_][\\p{L}\\p{Nd}_]*[ \\t]*(?:[+*/%\\-]|\\))|$))",
+      "end": "\\)|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
       "beginCaptures": {
         "0": {
           "name": "punctuation.definition.reporter.begin.sbdsl"
@@ -634,21 +554,39 @@
       },
       "patterns": [
         {
+          "include": "#known-reporters"
+        },
+        {
+          "include": "#list-reporter-value"
+        },
+        {
+          "include": "#namespaces"
+        },
+        {
           "include": "#arithmetic-left"
+        },
+        {
+          "include": "#arithmetic-extra-operators"
         },
         {
           "include": "#values"
         },
         {
+          "include": "#arithmetic-name"
+        },
+        {
+          "include": "#bare-name"
+        },
+        {
           "name": "support.function.reporter.sbdsl",
-          "match": "[^\\s\\[\\](){}<>\"/$@#,+*=]+|[+*=]|<(?!\\*)|>(?!\\*)"
+          "match": "[^\\s\\[\\](){}<>\"'/$@#,+*=]+|[+*=]|<(?!\\*)|>(?!\\*)"
         }
       ]
     },
     "arithmetic-operation": {
       "patterns": [
         {
-          "match": "(/'(?:[^'\\\\\\r\\n]|\\\\.)*'/)(?=[ \\t]*\\))",
+          "match": "('(?:[^'\\\\\\r\\n]|\\\\.)*')(?=[ \\t]*\\))",
           "captures": {
             "1": {
               "patterns": [
@@ -667,40 +605,31 @@
               "name": "invalid.illegal.operator.sbdsl"
             }
           },
-          "end": "(?=\\))|(?=[{}])|(?=^[ \\t]*(?:\\[|@(?:stage|init)\\b(?=[ \\t]*\\{)|@sprite\\b(?=[ \\t]+\")|@(?:var|list)\\b(?=[ \\t]+[\\p{L}_\"])|@global\\b(?=[ \\t]+@(?:var|list)\\b)|import\\b|定义自制积木|当|重复执行|循环|如果|否则))",
+          "end": "(?=\\))|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
           "patterns": [
             {
               "include": "#values"
+            },
+            {
+              "include": "#arithmetic-extra-operators"
+            },
+            {
+              "include": "#arithmetic-name"
             }
           ]
         },
         {
           "name": "meta.expression.binary.sbdsl",
-          "begin": "\\+(?!\\*)|-(?!\\*)|\\*(?!\\*)|/(?![\\*'])|mod",
+          "begin": "\\+(?!\\*)|-(?!\\*)|\\*(?!\\*)|/(?!\\*)|%",
           "beginCaptures": {
             "0": {
               "name": "keyword.operator.sbdsl"
             }
           },
-          "end": "(?=\\))|(?=[{}])|(?=^[ \\t]*(?:\\[|@(?:stage|init)\\b(?=[ \\t]*\\{)|@sprite\\b(?=[ \\t]+\")|@(?:var|list)\\b(?=[ \\t]+[\\p{L}_\"])|@global\\b(?=[ \\t]+@(?:var|list)\\b)|import\\b|定义自制积木|当|重复执行|循环|如果|否则))",
+          "end": "(?=\\))|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
           "patterns": [
             {
-              "match": "\\G([\\p{L}_][\\p{L}\\p{Nd}_.-]*)(?:(\\.)|(?=::))",
-              "captures": {
-                "1": {
-                  "name": "entity.name.namespace.sbdsl"
-                },
-                "2": {
-                  "name": "punctuation.separator.namespace.sbdsl"
-                }
-              }
-            },
-            {
-              "name": "constant.numeric.sbdsl",
-              "match": "\\G-?(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?(?![\\w.])"
-            },
-            {
-              "include": "#values"
+              "include": "#arithmetic-right"
             }
           ]
         }
@@ -709,12 +638,15 @@
     "arithmetic-left": {
       "patterns": [
         {
-          "begin": "((?:-?(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?|(?:\\$(?:global:)?(?:list:)?|@)(?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")|/'(?:[^'\\\\\\r\\n]|\\\\.)*'/|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"))",
+          "begin": "((?:-?(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?|(?:global:[\\p{L}_][\\p{L}\\p{Nd}_]*(?![\\p{L}\\p{Nd}_:])|@(?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"))|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"|'(?:[^'\\\\\\r\\n]|\\\\.)*'|[\\p{L}_][\\p{L}\\p{Nd}_]*(?=[ \\t]*(?:[+*/%\\-]|$))))",
           "beginCaptures": {
             "1": {
               "patterns": [
                 {
                   "include": "#values"
+                },
+                {
+                  "include": "#bare-name"
                 }
               ]
             }
@@ -767,26 +699,6 @@
         }
       ]
     },
-    "menu-string": {
-      "name": "string.quoted.single.menu.sbdsl",
-      "begin": "'",
-      "end": "'|$",
-      "patterns": [
-        {
-          "include": "#menu-escapes"
-        }
-      ],
-      "beginCaptures": {
-        "0": {
-          "name": "punctuation.definition.string.begin.sbdsl"
-        }
-      },
-      "endCaptures": {
-        "0": {
-          "name": "punctuation.definition.string.end.sbdsl"
-        }
-      }
-    },
     "comparison-operation": {
       "patterns": [
         {
@@ -797,16 +709,19 @@
               "name": "invalid.illegal.operator.sbdsl"
             }
           },
-          "end": "(?=[>]|[{}])|(?=^[ \\t]*(?:\\[|@(?:stage|init)\\b|@sprite\\b|@(?:var|list)\\b|import\\b|定义自制积木|当|重复执行|循环|如果|否则))",
+          "end": "(?=[>]|[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
           "patterns": [
             {
               "include": "#values"
+            },
+            {
+              "include": "#bare-name"
             }
           ]
         },
         {
           "name": "meta.expression.comparison.sbdsl",
-          "begin": "<(?!\\*)|=(?!\\*)|>(?=[ \\t]*(?:[$@\"(0-9.+-]|/'|[\\p{L}_][\\p{L}\\p{Nd}_.-]*\\.(?:\\(|<)|#))|^[ \\t]*>(?=[ \\t]*(?:#|$))",
+          "begin": "<(?!\\*)|=(?!\\*)|>(?=[ \\t]*(?:[@\"(0-9.+-]|'|(?!与\\b|或\\b|不成立\\b)[\\p{L}_]|#))|^[ \\t]*>(?=[ \\t]*(?:#|$))",
           "beginCaptures": {
             "0": {
               "name": "keyword.operator.sbdsl",
@@ -818,10 +733,13 @@
               ]
             }
           },
-          "end": "(?=[>]|[{}])|(?=^[ \\t]*(?:\\[|@(?:stage|init)\\b|@sprite\\b|@(?:var|list)\\b|import\\b|定义自制积木|当|重复执行|循环|如果|否则))",
+          "end": "(?=[>]|[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
           "patterns": [
             {
               "include": "#values"
+            },
+            {
+              "include": "#bare-name"
             }
           ]
         }
@@ -830,12 +748,15 @@
     "comparison-left": {
       "patterns": [
         {
-          "begin": "((?:-?(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?|(?:\\$(?:global:)?(?:list:)?|@)(?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")|/'(?:[^'\\\\\\r\\n]|\\\\.)*'/|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"))",
+          "begin": "((?:-?(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?|(?:global:[\\p{L}_][\\p{L}\\p{Nd}_]*(?![\\p{L}\\p{Nd}_:])|@(?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"))|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"|'(?:[^'\\\\\\r\\n]|\\\\.)*'|[\\p{L}_][\\p{L}\\p{Nd}_]*(?=[ \\t]*$)))",
           "beginCaptures": {
             "1": {
               "patterns": [
                 {
                   "include": "#values"
+                },
+                {
+                  "include": "#bare-name"
                 }
               ]
             }
@@ -852,7 +773,7 @@
           ]
         },
         {
-          "begin": "(?=\\(|<(?!\\*)|(?:[\\p{L}_][\\p{L}\\p{Nd}_.-]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")(?:::[^\\n]+?)?\\.(?:\\(|<))",
+          "begin": "(?=\\(|<(?!\\*))",
           "end": "(?=\\S)",
           "applyEndPatternLast": true,
           "patterns": [
@@ -872,6 +793,9 @@
               "include": "#boolean-parameter"
             },
             {
+              "include": "#comparison"
+            },
+            {
               "include": "#boolean"
             },
             {
@@ -883,7 +807,7 @@
     },
     "comparison": {
       "name": "meta.block.boolean.sbdsl",
-      "begin": "(<)((?:[ \\t]|#[^#\\r\\n]*#)*(?:-?(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?|(?:\\$(?:global:)?(?:list:)?|@)(?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"|/'(?:[^'\\\\\\r\\n]|\\\\.)*'/|(?:(?:[\\p{L}_][\\p{L}\\p{Nd}_.-]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")(?:::\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")?\\.)?(?<sbdsl_reporter>\\((?:\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"|/'(?:[^'\\\\\\r\\n]|\\\\.)*'/|[^()\"'\\r\\n]|\\g<sbdsl_reporter>)*\\))|<(?:true|false|(?:\\$(?:global:)?(?:list:)?|@)(?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"))>)(?:[ \\t]|#[^#\\r\\n]*#)*)(<(?!\\*)|=(?!\\*)|>(?=[ \\t]*(?:[$@\"(0-9.+-]|/'|[\\p{L}_][\\p{L}\\p{Nd}_.-]*\\.(?:\\(|<)|<|#)))",
+      "begin": "(?<!\\.)(<)((?:[ \\t]|#[^#\\r\\n]*#)*(?:-?(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?|(?:(?:global:[\\p{L}_][\\p{L}\\p{Nd}_]*(?![\\p{L}\\p{Nd}_:])|@(?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"))|(?!与\\b|或\\b|不成立\\b)[\\p{L}_][\\p{L}\\p{Nd}_]*)|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"|'(?:[^'\\\\\\r\\n]|\\\\.)*'|(?<sbdsl_reporter>\\((?:\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"|'(?:[^'\\\\\\r\\n]|\\\\.)*'|[^()\"'\\r\\n]|\\g<sbdsl_reporter>)*\\))|<(?:true|false|(?:(?:global:[\\p{L}_][\\p{L}\\p{Nd}_]*(?![\\p{L}\\p{Nd}_:])|@(?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"))|(?!与\\b|或\\b|不成立\\b)[\\p{L}_][\\p{L}\\p{Nd}_]*))>)(?:[ \\t]|#[^#\\r\\n]*#)*)(<(?!\\*)|=(?!\\*)|>(?=[ \\t]*(?:[@\"(0-9.+-]|'|(?!与\\b|或\\b|不成立\\b)[\\p{L}_]|<|#)))",
       "beginCaptures": {
         "1": {
           "name": "punctuation.definition.boolean.begin.sbdsl"
@@ -892,6 +816,9 @@
           "patterns": [
             {
               "include": "#values"
+            },
+            {
+              "include": "#bare-name"
             }
           ]
         },
@@ -905,7 +832,7 @@
           ]
         }
       },
-      "end": ">(?!\\*)|(?=[{}])|(?=^[ \\t]*(?:\\[|@(?:stage|init)\\b(?=[ \\t]*\\{)|@sprite\\b(?=[ \\t]+\")|@(?:var|list)\\b(?=[ \\t]+[\\p{L}_\"])|@global\\b(?=[ \\t]+@(?:var|list)\\b)|import\\b|定义自制积木|当|重复执行|循环|如果|否则))",
+      "end": ">(?!\\*)|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
       "endCaptures": {
         "0": {
           "name": "punctuation.definition.boolean.end.sbdsl"
@@ -914,6 +841,296 @@
       "patterns": [
         {
           "include": "#values"
+        },
+        {
+          "include": "#bare-name"
+        }
+      ]
+    },
+    "indented-init": {
+      "name": "meta.embedded.block.buildsb.sbdsl",
+      "begin": "^([ \\t]*)(init)(:)[ \\t]*(?=#|$)",
+      "end": "^(?!\\1[ \\t]+)(?=[ \\t]*\\S)",
+      "beginCaptures": {
+        "2": {
+          "name": "keyword.control.sbdsl"
+        },
+        "3": {
+          "name": "punctuation.section.block.begin.sbdsl"
+        }
+      },
+      "patterns": [
+        {
+          "name": "keyword.control.sbdsl",
+          "match": "\\bpass\\b"
+        },
+        {
+          "include": "source.sbdsl-build#json-values"
+        }
+      ]
+    },
+    "arithmetic-name": {
+      "name": "variable.other.readwrite.sbdsl",
+      "match": "(?:(?<=[+*/%\\-])[ \\t]*\\K|(?=[\\p{L}_][\\p{L}\\p{Nd}_]*[ \\t]*[+*/%\\-]))[\\p{L}_][\\p{L}\\p{Nd}_]*"
+    },
+    "arithmetic-extra-operators": {
+      "name": "keyword.operator.sbdsl",
+      "match": "/(?!\\*)|%"
+    },
+    "bare-name": {
+      "name": "variable.other.readwrite.sbdsl",
+      "match": "(?<![\\p{L}\\p{Nd}_$@:])[\\p{L}_][\\p{L}\\p{Nd}_]*(?![\\p{L}\\p{Nd}_.]|:(?![ \\t]*(?:#.*)?$))"
+    },
+    "assignment": {
+      "name": "meta.assignment.sbdsl",
+      "begin": "(?<!\\S)((?:global:)?[\\p{L}_][\\p{L}\\p{Nd}_]*)((?:[ \\t]|#[^#\\r\\n]*#)*)([+*/%\\-]?=)(?!=)",
+      "end": "(?=$)",
+      "beginCaptures": {
+        "1": {
+          "name": "variable.other.readwrite.sbdsl"
+        },
+        "3": {
+          "name": "keyword.operator.assignment.sbdsl"
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "#comments"
+            }
+          ]
+        }
+      },
+      "patterns": [
+        {
+          "include": "#known-reporters"
+        },
+        {
+          "include": "#namespaces"
+        },
+        {
+          "include": "#assignment-arithmetic-left"
+        },
+        {
+          "include": "#arithmetic-extra-operators"
+        },
+        {
+          "include": "#values"
+        },
+        {
+          "include": "#bare-name"
+        }
+      ]
+    },
+    "assignment-arithmetic-left": {
+      "patterns": [
+        {
+          "begin": "((?:-?(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?|(?:global:[\\p{L}_][\\p{L}\\p{Nd}_]*(?![\\p{L}\\p{Nd}_:])|@(?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"))|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"|'(?:[^'\\\\\\r\\n]|\\\\.)*'|[\\p{L}_][\\p{L}\\p{Nd}_]*(?=[ \\t]*(?:[+*/%\\-]|$))))",
+          "beginCaptures": {
+            "1": {
+              "patterns": [
+                {
+                  "include": "#values"
+                },
+                {
+                  "include": "#bare-name"
+                }
+              ]
+            }
+          },
+          "end": "(?=\\S|$)",
+          "applyEndPatternLast": true,
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "include": "#assignment-arithmetic-operation"
+            }
+          ]
+        },
+        {
+          "begin": "(?=\\()",
+          "end": "(?=\\S|$)",
+          "applyEndPatternLast": true,
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "include": "#infix-reporter"
+            },
+            {
+              "include": "#reporter"
+            },
+            {
+              "include": "#assignment-arithmetic-operation"
+            }
+          ]
+        }
+      ]
+    },
+    "assignment-arithmetic-operation": {
+      "patterns": [
+        {
+          "name": "meta.expression.binary.sbdsl",
+          "begin": "\\+\\*|-\\*|\\*\\*|/\\*|=\\*",
+          "beginCaptures": {
+            "0": {
+              "name": "invalid.illegal.operator.sbdsl"
+            }
+          },
+          "end": "(?=$)",
+          "patterns": [
+            {
+              "include": "#values"
+            },
+            {
+              "include": "#arithmetic-extra-operators"
+            },
+            {
+              "include": "#arithmetic-name"
+            }
+          ]
+        },
+        {
+          "name": "meta.expression.binary.sbdsl",
+          "begin": "\\+(?!\\*)|-(?!\\*)|\\*(?!\\*)|/(?!\\*)|%",
+          "beginCaptures": {
+            "0": {
+              "name": "keyword.operator.sbdsl"
+            }
+          },
+          "end": "(?=$)",
+          "patterns": [
+            {
+              "include": "#arithmetic-right"
+            }
+          ]
+        }
+      ]
+    },
+    "list-command-values": {
+      "patterns": [
+        {
+          "match": "(加入|显示列表|隐藏列表)([ \\t]*)(\\()((?:global:)?[\\p{L}_][\\p{L}\\p{Nd}_]*)([ \\t]*)(\\))",
+          "captures": {
+            "1": {
+              "name": "support.function.command.sbdsl"
+            },
+            "3": {
+              "name": "punctuation.definition.reporter.begin.sbdsl"
+            },
+            "4": {
+              "name": "variable.other.array.sbdsl"
+            },
+            "6": {
+              "name": "punctuation.definition.reporter.end.sbdsl"
+            }
+          }
+        },
+        {
+          "match": "(删除|在|将)([ \\t]*)(\\()((?:global:)?[\\p{L}_][\\p{L}\\p{Nd}_]*)([ \\t]*)(\\))(?=[ \\t]*(?:的第|的全部项目))",
+          "captures": {
+            "1": {
+              "name": "support.function.command.sbdsl"
+            },
+            "3": {
+              "name": "punctuation.definition.reporter.begin.sbdsl"
+            },
+            "4": {
+              "name": "variable.other.array.sbdsl"
+            },
+            "6": {
+              "name": "punctuation.definition.reporter.end.sbdsl"
+            }
+          }
+        }
+      ]
+    },
+    "list-reporter-value": {
+      "match": "(\\()((?:global:)?[\\p{L}_][\\p{L}\\p{Nd}_]*)(\\))(?=[ \\t]*(?:的第|的项目数|中第一个|包含))",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.reporter.begin.sbdsl"
+        },
+        "2": {
+          "name": "variable.other.array.sbdsl"
+        },
+        "3": {
+          "name": "punctuation.definition.reporter.end.sbdsl"
+        }
+      }
+    },
+    "retired-delimiters": {
+      "patterns": [
+        {
+          "name": "invalid.illegal.delimiter.sbdsl",
+          "match": "[\\[\\]]"
+        },
+        {
+          "name": "invalid.illegal.call.sbdsl",
+          "match": "(?:[\\p{L}_][\\p{L}\\p{Nd}_.-]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")::\"(?:[^\"\\\\\\r\\n]|\\\\.)*\"\\.(?=[\\[(<]|hat\\()"
+        }
+      ]
+    },
+    "known-reporters": {
+      "name": "support.function.reporter.sbdsl",
+      "match": "(?<![\\p{L}\\p{Nd}_])(?:计时器|回答|方向|大小|音量|响度|鼠标的[ \\t]+[xy][ \\t]+坐标|[xy][ \\t]+坐标)(?![\\p{L}\\p{Nd}_])"
+    },
+    "retired-declaration": {
+      "name": "invalid.illegal.declaration.sbdsl",
+      "match": "(?<!\\S)(?:global[ \\t]+)?(?:var|list)[ \\t]+(?:[\\p{L}_][\\p{L}\\p{Nd}_]*|\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")[ \\t]*(?==)"
+    },
+    "list-assignment": {
+      "name": "meta.assignment.list.sbdsl",
+      "begin": "(?<!\\S)((?:global:)?[\\p{L}_][\\p{L}\\p{Nd}_]*)([ \\t]*)(=)(?=[ \\t]*\\{)",
+      "end": "(?=$)",
+      "beginCaptures": {
+        "1": {
+          "name": "variable.other.array.sbdsl"
+        },
+        "3": {
+          "name": "keyword.operator.assignment.sbdsl"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#list-initializer"
+        }
+      ]
+    },
+    "invalid-data-assignment": {
+      "match": "(?<!\\S)((?:global:)?\"(?:[^\"\\\\\\r\\n]|\\\\.)*\")(?=[ \\t]*=)",
+      "name": "invalid.illegal.identifier.sbdsl"
+    },
+    "arithmetic-right": {
+      "patterns": [
+        {
+          "match": "\\G[ \\t]*([\\p{L}_][\\p{L}\\p{Nd}_.-]*)(?:(\\.)|(?=::))",
+          "captures": {
+            "1": {
+              "name": "entity.name.namespace.sbdsl"
+            },
+            "2": {
+              "name": "punctuation.separator.namespace.sbdsl"
+            }
+          }
+        },
+        {
+          "name": "constant.numeric.sbdsl",
+          "match": "\\G-?(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?(?![\\w.])"
+        },
+        {
+          "include": "#values"
+        },
+        {
+          "include": "#arithmetic-extra-operators"
+        },
+        {
+          "include": "#arithmetic-name"
         }
       ]
     }

@@ -7,20 +7,10 @@ use crate::{Error, Result};
 use serde::de::DeserializeOwned;
 use std::{collections::BTreeSet, ops::Range, path::Path};
 
-/// Parse a complete configuration object. When `root_braces_optional` is true,
-/// the outermost object may omit its braces; nested objects always need them.
-pub fn parse<T: DeserializeOwned>(
-    path: &Path,
-    source: &str,
-    root_braces_optional: bool,
-) -> Result<T> {
-    parse_region(path, source, 0..source.len(), root_braces_optional)
-}
-
 /// Build files additionally allow `"path.js" as "alias"` in the root
 /// `extensions` array. Sprite initialization and other data values do not.
 pub fn parse_build<T: DeserializeOwned>(path: &Path, source: &str) -> Result<T> {
-    parse_with_mode(path, source, 0..source.len(), true, true)
+    parse_with_mode(path, source, 0..source.len(), true)
 }
 
 /// Parse one region of a complete source document. Errors retain byte offsets
@@ -29,16 +19,14 @@ pub fn parse_region<T: DeserializeOwned>(
     path: &Path,
     source: &str,
     range: Range<usize>,
-    root_braces_optional: bool,
 ) -> Result<T> {
-    parse_with_mode(path, source, range, root_braces_optional, false)
+    parse_with_mode(path, source, range, false)
 }
 
 fn parse_with_mode<T: DeserializeOwned>(
     path: &Path,
     source: &str,
     range: Range<usize>,
-    root_braces_optional: bool,
     build_extensions: bool,
 ) -> Result<T> {
     if range.start > range.end
@@ -65,13 +53,8 @@ fn parse_with_mode<T: DeserializeOwned>(
         build_extensions,
     };
     parser.trivia()?;
-    if parser.peek() == Some('{') {
-        parser.object(true, 0)?;
-    } else if root_braces_optional {
-        parser.object(false, 0)?;
-    } else {
-        return Err(parser.error(parser.pos, "expected a data object enclosed in { ... }"));
-    }
+    let braced = parser.peek() == Some('{');
+    parser.object(braced, 0)?;
     parser.trivia()?;
     if parser.pos != parser.end {
         return Err(parser.error(parser.pos, "unexpected text after data object"));
@@ -140,10 +123,7 @@ impl Parser<'_> {
     }
 
     fn error(&self, pos: usize, message: impl Into<String>) -> Error {
-        let mut pos = pos.min(self.end);
-        while !self.source.is_char_boundary(pos) {
-            pos -= 1;
-        }
+        let pos = self.source.floor_char_boundary(pos.min(self.end));
         let end = pos
             + self.source[pos..self.end]
                 .chars()
@@ -430,11 +410,11 @@ impl Parser<'_> {
             }
             Some(_) => {
                 let start = self.pos;
-                while self
+                while let Some(c) = self
                     .peek()
-                    .is_some_and(|c| !matches!(c, ' ' | '\t' | '\r' | '\n' | ',' | '}' | ']' | '#'))
+                    .filter(|c| !matches!(c, ' ' | '\t' | '\r' | '\n' | ',' | '}' | ']' | '#'))
                 {
-                    self.pos += self.peek().unwrap().len_utf8();
+                    self.pos += c.len_utf8();
                 }
                 let scalar = &self.source[start..self.pos];
                 if matches!(scalar, "true" | "false" | "null") {
@@ -467,7 +447,7 @@ mod tests {
     use serde_json::{Value, json};
 
     fn value(source: &str) -> Result<Value> {
-        parse(Path::new("sbdsl.buildsb"), source, true)
+        parse_region(Path::new("sbdsl.buildsb"), source, 0..source.len())
     }
 
     #[test]
@@ -540,8 +520,7 @@ runtime: { fps: 60 }
     fn aliases_are_only_supported_in_build_root_extension_entries() {
         let path = Path::new("sbdsl.buildsb");
         let alias = r#"extensions: ["custom.js" as "custom"]"#;
-        assert!(parse::<Value>(path, alias, true).is_err());
-        assert!(parse_region::<Value>(path, alias, 0..alias.len(), true).is_err());
+        assert!(parse_region::<Value>(path, alias, 0..alias.len()).is_err());
         for source in [
             r#"entry: "main.sbdsl" as "main""#,
             r#"runtime: { extensions: ["custom.js" as "custom"] }"#,
@@ -720,31 +699,31 @@ _private0: -1.25e+3
             "{count: 1.5}",
             "{count: 1\n unknown: 2}",
         ] {
-            let source = format!("@sprite \"角色 😀\" {{\n @init {object}\n}}");
-            let start = source.find(object).unwrap();
-            let error = parse_region::<Typed>(path, &source, start..start + object.len(), false)
-                .unwrap_err();
+            let fields = &object[1..object.len() - 1];
+            let source = format!("sprite \"角色 😀\":\n    init:\n        {fields}\n");
+            let start = source.find(fields).unwrap();
+            let error =
+                parse_region::<Typed>(path, &source, start..start + fields.len()).unwrap_err();
             let span = error.span().unwrap();
             assert!(
-                span.start >= start && span.end <= start + object.len(),
+                span.start >= start && span.end <= start + fields.len(),
                 "{error}"
             );
             assert_eq!(
                 span.line,
-                if object.contains("unknown") { 3 } else { 2 },
+                if object.contains("unknown") { 4 } else { 3 },
                 "{error}"
             );
             assert!(source.is_char_boundary(span.start) && source.is_char_boundary(span.end));
             assert!(!error.0.contains(" at line "), "{error}");
         }
-        let typed: Typed = parse(path, "count: 2", true).unwrap();
+        let typed: Typed = parse_region(path, "count: 2", 0..8).unwrap();
         assert_eq!(typed.count, 2);
     }
 
     #[test]
     fn root_braces_and_region_boundaries_are_enforced() {
         let path = Path::new("test");
-        assert!(parse::<Value>(path, "x: 1", false).is_err());
         for source in [
             "[]",
             "{x: 1",
@@ -755,7 +734,7 @@ _private0: -1.25e+3
         ] {
             assert!(value(source).is_err(), "{source}");
         }
-        assert!(parse_region::<Value>(path, "😀", 1..4, true).is_err());
+        assert!(parse_region::<Value>(path, "😀", 1..4).is_err());
         let deep = format!("x: {}0{}", "[".repeat(200), "]".repeat(200));
         assert!(value(&deep).unwrap_err().0.contains("nested too deeply"));
     }

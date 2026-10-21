@@ -50,6 +50,24 @@ pub fn load_recovering(
     }
 }
 
+pub(crate) fn resolve_module_path(
+    file: &Path,
+    src_dir: &Path,
+    module: &str,
+    provider: &dyn SourceProvider,
+) -> std::result::Result<PathBuf, (PathBuf, PathBuf)> {
+    let relative = format!("{}.sbdsl", module.replace('.', "/"));
+    let nearby = file.parent().unwrap_or(Path::new(".")).join(&relative);
+    if provider.is_file(&nearby) {
+        return Ok(nearby);
+    }
+    let fallback = src_dir.join(&relative);
+    if provider.is_file(&fallback) {
+        return Ok(fallback);
+    }
+    Err((nearby, fallback))
+}
+
 struct Loader<'a> {
     project: Project,
     visited: BTreeSet<PathBuf>,
@@ -115,21 +133,15 @@ impl<'a> Loader<'a> {
     fn item(&mut self, item: Item, file: &Path, entry: bool, sprite: Option<usize>) -> Result<()> {
         match item {
             Item::Import { module, span } => {
-                let relative = format!("{}.sbdsl", module.replace('.', "/"));
-                let nearby = file.parent().unwrap_or(Path::new(".")).join(&relative);
-                let fallback = self.src_dir.join(&relative);
-                let target = if self.provider.is_file(&nearby) {
-                    nearby
-                } else if self.provider.is_file(&fallback) {
-                    fallback
-                } else {
-                    return Err(Error::new(format!(
-                        "找不到模块 {module}；已查找 {} 和 {}",
-                        nearby.display(),
-                        fallback.display()
-                    ))
-                    .at(&span));
-                };
+                let target = resolve_module_path(file, &self.src_dir, &module, self.provider)
+                    .map_err(|(nearby, fallback)| {
+                        Error::new(format!(
+                            "找不到模块 {module}；已查找 {} 和 {}",
+                            nearby.display(),
+                            fallback.display()
+                        ))
+                        .at(&span)
+                    })?;
                 self.file(&target, false)?;
             }
             Item::Stage(children) => self.items(children, file, entry, None)?,
@@ -150,7 +162,7 @@ impl<'a> Loader<'a> {
                             .map(|s| format!("{}:{}:{}", s.file, s.line, s.column))
                             .unwrap_or_else(|| "未知位置".into());
                         return Err(Error::new(format!(
-                                "重复创建角色 {name:?}；此前定义在 {previous}。请使用 @sprite \"角色名\" add {{ ... }} 追加逻辑"
+                                "重复创建角色 {name:?}；此前定义在 {previous}。请使用 sprite \"角色名\" add: 并缩进代码体 追加逻辑"
                             ))
                             .at(&span));
                     }
@@ -160,11 +172,11 @@ impl<'a> Loader<'a> {
                         return Err(Error::new(format!("add 的角色 {name:?} 尚未定义")).at(&span));
                     }
                     if init.is_none() && !self.recovering {
-                        return Err(Error::new("创建角色必须以 @init { ... } 开头").at(&span));
+                        return Err(Error::new("创建角色必须以 init: 开头").at(&span));
                     }
                     // Bind resources to the declaring module, before any imports or
                     // later add blocks can change the surrounding project context.
-                    // Recovery keeps the target after a broken @init, so its
+                    // Recovery keeps the target after a broken init, so its
                     // children can still be checked with private scope intact.
                     if let Some(properties) = init.as_mut() {
                         for asset in properties.costumes.iter_mut().chain(&mut properties.sounds) {
@@ -195,8 +207,29 @@ impl<'a> Loader<'a> {
                 value,
                 list,
                 global,
-                ..
+                span,
             } => {
+                let conflict = |target: &Target| {
+                    if list {
+                        target.variables.contains_key(&name)
+                    } else {
+                        target.lists.contains_key(&name)
+                    }
+                };
+                let conflicting = match (global, sprite) {
+                    (false, Some(index)) => {
+                        conflict(&self.project.sprites[index]) || conflict(&self.project.stage)
+                    }
+                    _ => conflict(&self.project.stage) || self.project.sprites.iter().any(conflict),
+                };
+                if conflicting {
+                    return Err(Error::new(format!(
+                        "名称 {name:?} 已声明为{}，同一可见作用域内不能改为{}",
+                        if list { "变量" } else { "列表" },
+                        if list { "列表" } else { "变量" },
+                    ))
+                    .at(&span));
+                }
                 let target = match (global, sprite) {
                     (false, Some(index)) => &mut self.project.sprites[index],
                     _ => &mut self.project.stage,

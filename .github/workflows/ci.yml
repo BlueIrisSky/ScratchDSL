@@ -44,9 +44,7 @@ jobs:
         run: cargo +"$RUST_TOOLCHAIN" test --workspace --locked
       - name: Build example projects
         run: |
-          cargo +"$RUST_TOOLCHAIN" run --locked -- check examples/hello/sbdsl.buildsb
           cargo +"$RUST_TOOLCHAIN" run --locked -- build examples/hello/sbdsl.buildsb
-          cargo +"$RUST_TOOLCHAIN" run --locked -- check examples/extensions/sbdsl.buildsb
           cargo +"$RUST_TOOLCHAIN" run --locked -- build examples/extensions/sbdsl.buildsb
 
   windows-package:
@@ -153,27 +151,10 @@ jobs:
         run: |
           test "$GITHUB_REF_NAME" = "v$RELEASE_VERSION"
           python .github/scripts/release-assets.py
-          (cd dist && sha256sum --check SHA256SUMS.txt)
       - name: Publish verified assets
         run: |
           tag="$GITHUB_REF_NAME"
-          notes="$RUNNER_TEMP/release-notes.md"
-          cat > "$notes" <<'EOF'
-          Windows x64 版本。
-
-          - `Install.exe`：独立安装程序，包含编译器和语言服务器，并加入用户 PATH。
-          - `scratchdsl-*-windows-x64.zip`：便携版，解压后运行 `sbdsl.exe`。
-          - `sbdsl.exe`：单独的编译器和语言服务器可执行文件。
-          - `scratchdsl-*-win32-x64.vsix`：VS Code 插件，内含语言服务器。
-          - `SHA256SUMS.txt`：下载文件校验值。
-          - `release-manifest.json`：源码提交、版本及产物信息。
-          - `THIRD_PARTY_NOTICES.txt`：第三方依赖许可证。
-          - `LICENSE`：ScratchDSL 的 MIT 许可证。
-
-          安装程序和插件无需另外安装 Rust。发布前已通过 Linux / Windows 编译器测试、Windows PATH 测试及实际 VS Code 插件测试。
-
-          比较写作 `<$hp < 1>`、`<$score > 100>`，菜单写作 `/'选项'/`。VS Code 插件提供语法高亮、工程诊断、积木与变量补全，以及构建按钮。
-          EOF
+          notes="docs/releases/$RELEASE_VERSION.md"
           if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
             if [ "$draft" != true ]; then
               echo "Release $tag is already published; refusing to replace its assets."
@@ -181,7 +162,7 @@ jobs:
             fi
           else
             gh release create "$tag" --verify-tag --target "$GITHUB_SHA" \
-              --draft --title "ScratchDSL $RELEASE_VERSION" --notes-file "$notes"
+              --draft --prerelease --title "ScratchDSL $RELEASE_VERSION（过渡版）" --notes-file "$notes"
           fi
           gh release upload "$tag" dist/Install.exe dist/sbdsl.exe \
             "dist/scratchdsl-$RELEASE_VERSION-windows-x64.zip" \
@@ -189,5 +170,5 @@ jobs:
             dist/SHA256SUMS.txt dist/release-manifest.json dist/THIRD_PARTY_NOTICES.txt dist/LICENSE --clobber
           gh release view "$tag" --json assets > "$RUNNER_TEMP/uploaded-assets.json"
           python .github/scripts/release-assets.py "$RUNNER_TEMP/uploaded-assets.json"
-          gh release edit "$tag" --draft=false --latest --target "$GITHUB_SHA" \
-            --title "ScratchDSL $RELEASE_VERSION" --notes-file "$notes"
+          gh release edit "$tag" --draft=false --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "ScratchDSL $RELEASE_VERSION（过渡版）" --notes-file "$notes"

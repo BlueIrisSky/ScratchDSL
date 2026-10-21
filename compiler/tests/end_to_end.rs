@@ -90,7 +90,7 @@ fn cli_initializes_and_builds_with_the_new_configuration() {
     assert!(!config.contains(','));
     assert!(!root.join("config.json").exists());
     let source = fs::read_to_string(root.join("src/main.sbdsl")).unwrap();
-    assert!(source.starts_with("@sprite \"main\""));
+    assert!(source.starts_with("sprite \"main\""));
     let icon = fs::read(root.join("assets/sbdsl.svg")).unwrap();
     assert!(std::str::from_utf8(&icon).unwrap().contains("<svg"));
     for command in ["check", "build"] {
@@ -150,30 +150,30 @@ fn simplified_operators_generate_the_expected_scratch_blocks() {
     let directory = tempfile::tempdir().unwrap();
     let project = compile(
         directory.path(),
-        r#"@var hp = 1
-@var score = 101
-@sprite "运算" {
-@init {}
-当绿旗被点击 {
-    [说 (1 + 2)]
-    [说 (1 - 2)]
-    [说 (2 * 3)]
-    [说 (8 / 2)]
-    [说 (7 mod 3)]
-    如果 <$hp < 1> 那么 { [说 "低血量"] }
-    如果 <$score > 100> 那么 { [说 "高分"] }
-    如果 <$score = 100> 那么 { [说 "满分"] }
-    [说 (1+(2*3))]
-    [说 (1e-5--2)]
-    [说 (8 /
-        (6 / 2))]
-    如果 <<$hp<2> 与 <$score>100>> 那么 {
-        [将 $score
-            设为 ($score - 1)]
-    }
-    [说 "后续命令"]
-}
-}
+        r#"hp = 1
+score = 101
+sprite "运算":
+    init:
+        pass
+    start:
+        说 (1 + 2)
+        说 (1 - 2)
+        说 (2 * 3)
+        说 (8 / 2)
+        说 (7 % 3)
+        if <hp < 1>:
+            说 ("低血量")
+        if <score > 100>:
+            说 ("高分")
+        if <score = 100>:
+            说 ("满分")
+        说 (1+(2*3))
+        说 (1e-5--2)
+        说 (8 /
+            (6 / 2))
+        if <<hp < 2> 与 <score>100>>:
+            score = (score - 1)
+        说 ("后续命令")
 "#,
     )
     .unwrap();
@@ -199,21 +199,30 @@ fn simplified_operators_generate_the_expected_scratch_blocks() {
             .values()
             .any(|block| block["inputs"]["MESSAGE"][1][1] == "后续命令")
     );
+    assert!(
+        blocks.values().any(|block| {
+            block["opcode"] == "operator_divide"
+                && block["inputs"]["NUM2"][1]
+                    .as_str()
+                    .is_some_and(|right| blocks[right]["opcode"] == "operator_divide")
+        }),
+        "8 / (6 / 2) must retain the right-hand grouping"
+    );
     assert_graph(&project.json);
 }
 
 #[test]
 fn import_order_overwrite_cycle_and_discarded_stage_scripts() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("A.sbdsl"),"import B\n@var score = 1\n@list logs = [\"A\"]\n当绿旗被点击 { [说 $not_created] }\n@sprite \"玩家\" { @init {}\n当绿旗被点击 { [将 $score 增加 1] } }\n").unwrap();
+    fs::write(dir.path().join("A.sbdsl"),"import B\nscore = 1\nlogs = {\"A\"}\nstart:\n    说 (not_created)\nsprite \"玩家\":\n    init:\n        pass\n    start:\n        score += 1\n").unwrap();
     fs::write(
         dir.path().join("B.sbdsl"),
-        "import main\n@var score = 2\n@list logs = [\"B\", 3]\n",
+        "import main\nscore = 2\nlogs = {\"B\", 3}\n",
     )
     .unwrap();
     let p = compile(
         dir.path(),
-        "import A\nimport B\n@sprite \"玩家\" add { 当按下 /'space'/ 键 { [移动 1 步] } }\n",
+        "import A\nimport B\nsprite \"玩家\" add:\n    当按下 'space' 键:\n        移动 (1) 步\n",
     )
     .unwrap();
     let stage = &p.json["targets"][0];
@@ -233,7 +242,7 @@ fn add_never_creates_a_sprite() {
     let dir = tempfile::tempdir().unwrap();
     let err = compile(
         dir.path(),
-        "@sprite \"玩家\" add {}\n@sprite \"玩家\" { @init {} }\n",
+        "sprite \"玩家\" add:\n    pass\nsprite \"玩家\":\n    init:\n        pass\n",
     )
     .unwrap_err();
     assert!(err.to_string().contains("add"));
@@ -245,19 +254,20 @@ fn comments_menus_and_division_are_distinct() {
     let dir = tempfile::tempdir().unwrap();
     let p = compile(
         dir.path(),
-        r##"
-# 单行注释
+        r##"# 单行注释
 #
 跨行注释
 #
-@sprite "玩家" {
-    @init {}
-    当按下 /'space'/ 键 {
-        [说 "# / 不变"] # 行尾
-        [将 $hp 设为 (8 / 2)]
-        如果 <$hp < 5> 那么 { [说 "好"] } 否则 { [说 "否"] }
-    }
-}
+sprite "玩家":
+    init:
+        pass
+    当按下 'space' 键:
+        说 ("# / 不变") # 行尾
+        hp = (8 / 2)
+        if <hp < 5>:
+            说 ("好")
+        else:
+            说 ("否")
 "##,
     )
     .unwrap();
@@ -272,18 +282,17 @@ fn public_body_keeps_global_binding_inside_private_scope() {
     let dir = tempfile::tempdir().unwrap();
     let p = compile(
         dir.path(),
-        r#"
-@var score = 1
-定义自制积木 增加分数 数量: @n @warp { [将 $score 增加 @n] }
-@sprite "玩家" {
-    @init {}
-    @var score = 100
-    当绿旗被点击 {
-        [增加分数 数量: 2]
-        [将 $score 增加 3]
-        [将 $global:score 增加 4]
-    }
-}
+        r#"score = 1
+def 增加分数 数量: @n @warp:
+    score += @n
+sprite "玩家":
+    init:
+        pass
+    score = 100
+    start:
+        增加分数 数量: (2)
+        score += 3
+        global:score += 4
 "#,
     )
     .unwrap();
@@ -418,11 +427,12 @@ fn extension_aliases_change_source_names_without_changing_runtime_identity() {
     // An alias replaces the filename namespace; the old name must not remain
     // as an invisible fallback for either text matching or explicit opcodes.
     for invocation in [
-        "\"自定义拓展\".[移动 20 步]",
-        "\"自定义拓展\"::\"move\".[20]",
+        "\"自定义拓展\".移动 (20) 步",
+        "\"自定义拓展\"::\"move\"((20))",
     ] {
-        let source =
-            format!("@sprite \"玩家\" {{\n@init {{}}\n当绿旗被点击 {{ {invocation} }}\n}}\n");
+        let source = format!(
+            "sprite \"玩家\":\n    init:\n        pass\n    start:\n        {invocation}\n"
+        );
         assert!(compile(directory.path(), &source).is_err(), "{invocation}");
     }
 
@@ -449,7 +459,7 @@ fn emits_turbowarp_settings_in_runtime_format() {
         r#"{"runtime":{"fps":60,"stageWidth":640,"stageHeight":480,"fencing":false}}"#,
     )
     .unwrap();
-    let p = compile(dir.path(), "@var x = 1\n").unwrap();
+    let p = compile(dir.path(), "x = 1\n").unwrap();
     let comments = p.json["targets"][0]["comments"].as_object().unwrap();
     let text = comments.values().next().unwrap()["text"].as_str().unwrap();
     let line = text
@@ -468,10 +478,10 @@ fn emits_turbowarp_settings_in_runtime_format() {
 fn rejects_unresolved_lists_bad_parameters_and_stage_motion() {
     let dir = tempfile::tempdir().unwrap();
     for source in [
-        "当绿旗被点击 { [删除 $list:missing 的全部项目] }",
-        "定义自制积木 测试 { [等待 @unknown 秒] }",
-        "定义自制积木 测试 { [移动 1 步] }\n当绿旗被点击 { [测试] }",
-        "当绿旗被点击 { [等待 (1 + 2 * 3) 秒] }",
+        "start:\n    删除 (missing) 的全部项目",
+        "def 测试:\n    等待 (@unknown) 秒",
+        "def 测试:\n    移动 (1) 步\nstart:\n    测试",
+        "start:\n    等待 ((1) + * (3)) 秒\n",
     ] {
         assert!(
             compile(dir.path(), source).is_err(),
@@ -504,15 +514,12 @@ fn packs_stage_config_assets_and_sprite_source_assets_with_real_metadata() {
         r#"{"stage":{"backdrops":[{"name":"背景","path":"assets/bg.svg"}]}}"#,
     )
     .unwrap();
-    let source = r#"
-@sprite "玩家" {
-    @init {
+    let source = r#"sprite "玩家":
+    init:
         "x": 12,
         "rotationStyle": "left-right",
         "costumes": [{"name": "造型", "path": "assets/player.png"}],
         "sounds": [{"name": "音效", "path": "assets/tone.wav"}]
-    }
-}
 "#;
     let p = compile(dir.path(), source).unwrap();
     let target = &p.json["targets"][1];
@@ -537,18 +544,17 @@ fn sprite_init_sets_static_state_without_initialization_scripts() {
     let dir = tempfile::tempdir().unwrap();
     let p = compile(
         dir.path(),
-        r#"
-@sprite "初态" {
-    @init {
+        r#"sprite "初态":
+    init:
         "x": -123.5,
         "y": 45,
         "size": 75,
         "direction": -90,
         "visible": false,
         "rotationStyle": "don't rotate"
-    }
-}
-@sprite "默认" { @init {} }
+sprite "默认":
+    init:
+        pass
 "#,
     )
     .unwrap();
@@ -591,13 +597,10 @@ fn imported_sprite_assets_resolve_from_the_declaring_module() {
     .unwrap();
     fs::write(
         dir.path().join("modules/player.sbdsl"),
-        r#"
-@sprite "模块角色" {
-    @init {
+        r#"sprite "模块角色":
+    init:
         "costumes": [{"name": "模块造型", "path": "assets/player.svg"}],
         "sounds": [{"name": "模块声音", "path": "assets/tone.wav"}]
-    }
-}
 "#,
     )
     .unwrap();
@@ -622,12 +625,12 @@ fn sprite_add_preserves_init_and_duplicate_creation_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("player.sbdsl"),
-        "@sprite \"玩家\" { @init {\"x\":42,\"size\":80,\"visible\":false} }\n",
+        "sprite \"玩家\":\n    init:\n        \"x\":42,\"size\":80,\"visible\":false\n",
     )
     .unwrap();
     let p = compile(
         dir.path(),
-        "import player\n@sprite \"玩家\" add { 当绿旗被点击 { [移动 1 步] } }\n",
+        "import player\nsprite \"玩家\" add:\n    start:\n        移动 (1) 步\n",
     )
     .unwrap();
     assert_eq!(p.json["targets"].as_array().unwrap().len(), 2);
@@ -638,13 +641,13 @@ fn sprite_add_preserves_init_and_duplicate_creation_is_rejected() {
     assert_eq!(target["blocks"].as_object().unwrap().len(), 2);
     assert_graph(&p.json);
     for source in [
-        "import player\n@sprite \"玩家\" { @init {} }\n",
-        "@sprite \"玩家\" { @init {} }\n@sprite \"玩家\" { @init {} }\n",
+        "import player\nsprite \"玩家\":\n    init:\n        pass\n",
+        "sprite \"玩家\":\n    init:\n        pass\nsprite \"玩家\":\n    init:\n        pass\n",
     ] {
         let error = compile(dir.path(), source).unwrap_err().to_string();
         assert!(error.contains("玩家"), "{error}");
         assert!(error.contains("add"), "{error}");
-        assert!(error.contains(":2:"), "{error}");
+        assert!(error.contains(":2:") || error.contains(":4:"), "{error}");
     }
 }
 
@@ -652,7 +655,7 @@ fn sprite_add_preserves_init_and_duplicate_creation_is_rejected() {
 fn config_rejects_sprites_field() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("sbdsl.buildsb"), r#"{"sprites":{}}"#).unwrap();
-    let error = compile(dir.path(), "@sprite \"玩家\" { @init {} }\n")
+    let error = compile(dir.path(), "sprite \"玩家\":\n    init:\n        pass\n")
         .unwrap_err()
         .to_string();
     assert!(error.contains("unknown field `sprites`"), "{error}");
@@ -662,12 +665,12 @@ fn config_rejects_sprites_field() {
 fn init_is_required_first_unique_and_forbidden_in_add() {
     let dir = tempfile::tempdir().unwrap();
     for source in [
-        "@sprite \"玩家\" {}\n",
-        "@sprite \"玩家\" { @var score = 0\n@init {} }\n",
-        "@sprite \"玩家\" { 当绿旗被点击 {}\n@init {} }\n",
-        "@sprite \"玩家\" { @init {}\n@init {} }\n",
-        "@sprite \"玩家\" { @init {} }\n@sprite \"玩家\" add { @init {} }\n",
-        "@init {}\n",
+        "sprite \"玩家\":\n    pass\n",
+        "sprite \"玩家\":\n    score = 0\n    init:\n        pass\n",
+        "sprite \"玩家\":\n    start:\n        pass\n    init:\n        pass\n",
+        "sprite \"玩家\":\n    init:\n        pass\n    init:\n        pass\n",
+        "sprite \"玩家\":\n    init:\n        pass\nsprite \"玩家\" add:\n    init:\n        pass\n",
+        "init:\n    pass\n",
     ] {
         assert!(
             compile(dir.path(), source).is_err(),
@@ -689,12 +692,10 @@ fn costume_order_is_preserved_and_names_are_unique_per_asset_kind() {
     fs::write(dir.path().join("tone.wav"), tiny_wav()).unwrap();
     let p = compile(
         dir.path(),
-        r#"@sprite "玩家" {
-    @init {
+        r#"sprite "玩家":
+    init:
         "costumes": [{"name":"第二","path":"b.svg"},{"name":"第一","path":"a.svg"}],
-        "sounds": [{"name":"第二","path":"tone.wav"}]
-    }
-}"#,
+        "sounds": [{"name":"第二","path":"tone.wav"}]"#,
     )
     .unwrap();
     let target = &p.json["targets"][1];
@@ -707,7 +708,10 @@ fn costume_order_is_preserved_and_names_are_unique_per_asset_kind() {
         r#"{"costumes":[{"name":"重复","path":"a.svg"},{"name":"重复","path":"b.svg"}]}"#,
         r#"{"sounds":[{"name":"重复","path":"tone.wav"},{"name":"重复","path":"tone.wav"}]}"#,
     ] {
-        let source = format!("@sprite \"玩家\" {{ @init {init} }}\n");
+        let source = format!(
+            "sprite \"玩家\":\n    init:\n        {}\n",
+            &init[1..init.len() - 1]
+        );
         assert!(
             compile(dir.path(), &source).is_err(),
             "should fail: {source}"
@@ -744,7 +748,10 @@ fn init_rejects_unknown_duplicate_mistyped_and_invalid_values() {
         r#"{"sounds":[{"name":"声音","path":"data:audio/wav;base64,AAAA"}]}"#,
         r#"{visible: true size: 100}"#,
     ] {
-        let source = format!("@sprite \"玩家\" {{ @init {init} }}\n");
+        let source = format!(
+            "sprite \"玩家\":\n    init:\n        {}\n",
+            &init[1..init.len() - 1]
+        );
         assert!(
             compile(dir.path(), &source).is_err(),
             "should fail: {source}"

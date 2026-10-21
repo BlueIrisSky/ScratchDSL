@@ -1,8 +1,8 @@
 use crate::error::{Error, Result};
 use crate::model::*;
 use crate::parser::{
-    parse_menu, parse_name, parse_number, parse_string, scan_atom, scan_atom_candidates,
-    strip_comments,
+    assignment_parts, parse_menu, parse_name, parse_number, parse_reference, parse_string,
+    scan_atom, scan_atom_candidates, strip_comments,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,8 +32,44 @@ impl Registry {
         Resolution::new(self, visible).parse(source, shape)
     }
 
+    pub fn parse_typed(
+        &self,
+        source: &str,
+        shape: Shape,
+        visible: &[Template],
+        data_types: &BTreeMap<(String, bool), bool>,
+    ) -> Result<Invocation> {
+        let mut resolution = Resolution::new(self, visible);
+        resolution.data_types = Some(data_types);
+        resolution.parse(source, shape)
+    }
+
     pub fn value(&self, source: &str, visible: &[Template]) -> Result<Expr> {
         Resolution::new(self, visible).value(source)
+    }
+
+    pub fn value_for_slot(&self, source: &str, slot: &Slot, visible: &[Template]) -> Result<Expr> {
+        Resolution::new(self, visible).value_for_slot(source, slot)
+    }
+
+    pub fn value_for_slot_typed(
+        &self,
+        source: &str,
+        slot: &Slot,
+        visible: &[Template],
+        data_types: &BTreeMap<(String, bool), bool>,
+    ) -> Result<Expr> {
+        let mut resolution = Resolution::new(self, visible);
+        resolution.data_types = Some(data_types);
+        resolution.value_for_slot(source, slot)
+    }
+
+    pub(crate) fn builtin_template(&self, opcode: &str) -> Result<Template> {
+        self.templates
+            .iter()
+            .find(|template| template.namespace.is_none() && template.opcode == opcode)
+            .cloned()
+            .ok_or_else(|| Error::new(format!("缺少内置积木 {opcode}")))
     }
 }
 
@@ -42,6 +78,7 @@ impl Registry {
 struct Resolution<'a> {
     registry: &'a Registry,
     visible: &'a [Template],
+    data_types: Option<&'a BTreeMap<(String, bool), bool>>,
     calls: BTreeMap<(u8, String), Result<Invocation>>,
     values: BTreeMap<String, Result<Expr>>,
     work: usize,
@@ -54,6 +91,7 @@ impl<'a> Resolution<'a> {
         Self {
             registry,
             visible,
+            data_types: None,
             calls: BTreeMap::new(),
             values: BTreeMap::new(),
             work: 0,
@@ -110,9 +148,54 @@ impl<'a> Resolution<'a> {
         result
     }
 
+    fn symbol(&self, name: String, global: bool) -> Expr {
+        let list = self
+            .data_types
+            .and_then(|types| types.get(&(name.clone(), global)))
+            .copied()
+            .unwrap_or(false);
+        Expr::Symbol { name, list, global }
+    }
+
+    fn validate(&self, slot: &Slot, value: Expr) -> Result<Expr> {
+        if let Some(types) = self.data_types
+            && let Expr::Symbol { name, global, .. } = &value
+        {
+            let kind = types.get(&(name.clone(), *global)).copied();
+            if slot.arg_type == ArgType::List {
+                match kind {
+                    None => return Err(Error::new(format!("未声明列表 {name:?}"))),
+                    Some(false) => {
+                        return Err(Error::new(format!("变量 {name:?} 不能用于列表槽位")));
+                    }
+                    Some(true) => {}
+                }
+            } else if kind == Some(true) {
+                return Err(Error::new(format!(
+                    "列表 {name:?} 不能用于 {:?} 槽位；请使用列表积木读取数据",
+                    slot.arg_type
+                )));
+            }
+        }
+        validate_slot(slot, value)
+    }
+
     fn parse_uncached(&mut self, source: &str, shape: Shape) -> Result<Invocation> {
         let clean = strip_comments(source)?;
         let source = clean.trim();
+        if shape == Shape::Command
+            && let Some(assignment) = assignment_parts(source)
+        {
+            return self.assignment(assignment);
+        }
+        let source = if shape == Shape::Boolean {
+            wrapped(source, '<', '>')?
+        } else {
+            source
+        };
+        if source.starts_with('[') {
+            return Err(Error::new("命令积木不再使用 []，请直接书写积木文字和输入"));
+        }
         let (namespace, local_opcode, rest) = prefix(source)?;
         if let Some(ns) = &namespace
             && !self
@@ -131,6 +214,13 @@ impl<'a> Resolution<'a> {
             .chain(visible.iter())
             .filter(|t| t.shape == shape && t.namespace == namespace)
             .filter(|t| {
+                t.namespace.is_some()
+                    || !matches!(
+                        t.opcode.as_str(),
+                        "data_setvariableto" | "data_changevariableby"
+                    )
+            })
+            .filter(|t| {
                 local_opcode
                     .as_ref()
                     .is_none_or(|op| t.local_opcode.as_ref() == Some(op))
@@ -142,19 +232,10 @@ impl<'a> Resolution<'a> {
                     "显式 opcode 不存在、重复或形状不符: {source}"
                 )));
             }
-            let inner = if shape == Shape::Hat {
-                wrapped(
-                    rest.strip_prefix("hat")
-                        .ok_or_else(|| Error::new("显式帽子必须使用 .hat(...)"))?,
-                    '(',
-                    ')',
-                )?
-            } else {
-                content(rest, shape)?
-            };
-            let values = self.explicit_arguments(inner)?;
+            let inner = wrapped(rest, '(', ')')?;
             let template = candidates[0];
             let slots: Vec<&Slot> = template.slots().collect();
+            let values = Self::explicit_arguments(inner)?;
             if slots.len() != values.len() {
                 return Err(Error::new(format!(
                     "{} 需要 {} 个参数，实际 {} 个",
@@ -166,18 +247,23 @@ impl<'a> Resolution<'a> {
             let args = slots
                 .iter()
                 .zip(values)
-                .map(|(s, v)| validate_slot(s, v))
+                .map(|(slot, source)| self.value_for_slot(source, slot))
                 .collect::<Result<Vec<_>>>()?;
             return Ok(Invocation {
                 template: template.clone(),
                 args,
             });
         }
-        let inner = content(rest, shape)?;
+        if shape == Shape::Reporter && namespace.is_none() {
+            let grouped = format!("({rest})");
+            if let Some(Expr::Call(call)) = self.arithmetic(&grouped, false)? {
+                return Ok(*call);
+            }
+        }
         let mut matches: Vec<(usize, Invocation)> = Vec::new();
         let mut details = Vec::new();
         for template in candidates {
-            match self.match_template(inner, template) {
+            match self.match_template(rest, template) {
                 Ok(bindings) => {
                     let score = template
                         .tokens
@@ -249,6 +335,57 @@ impl<'a> Resolution<'a> {
         Ok(matches.remove(0).1)
     }
 
+    fn assignment(&mut self, assignment: crate::parser::Assignment<'_>) -> Result<Invocation> {
+        let (name, global) = parse_reference(assignment.target)?;
+        if assignment.value.is_empty() {
+            return Err(Error::new("赋值语句缺少右侧的值"));
+        }
+        let target = self.symbol(name, global);
+        let value = match ArithmeticParser::parse(assignment.value, 0)? {
+            Some(node) => self.lower_arithmetic(node, 0)?,
+            None => self.value(assignment.value)?,
+        };
+        let (opcode, value) = match assignment.operator {
+            "=" => ("data_setvariableto", value),
+            "+=" => ("data_changevariableby", value),
+            operator => (
+                "data_setvariableto",
+                self.binary_math(operator.chars().next().unwrap(), target.clone(), value)?,
+            ),
+        };
+        let template = self.registry.builtin_template(opcode)?;
+        let args = template
+            .slots()
+            .zip([target, value])
+            .map(|(slot, value)| self.validate(slot, value))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Invocation { template, args })
+    }
+
+    fn value_for_slot(&mut self, source: &str, slot: &Slot) -> Result<Expr> {
+        let source = source.trim();
+        let value = if matches!(slot.arg_type, ArgType::Variable | ArgType::List) {
+            let inner = wrapped(source, '(', ')')?.trim();
+            let (name, global) = parse_reference(inner)?;
+            self.symbol(name, global)
+        } else if slot.arg_type == ArgType::Boolean {
+            wrapped(source, '<', '>')?;
+            self.value(source)?
+        } else if slot_requires_parentheses(slot) {
+            wrapped(source, '(', ')')?;
+            self.value(source)?
+        } else {
+            if source.starts_with('(') {
+                return Err(Error::new(format!(
+                    "参数 {} 是固定字段，不使用圆括号输入",
+                    slot.name
+                )));
+            }
+            self.value(source)?
+        };
+        self.validate(slot, value)
+    }
+
     fn value_uncached(&mut self, source: &str) -> Result<Expr> {
         let clean = strip_comments(source)?;
         let s = clean.trim();
@@ -261,8 +398,30 @@ impl<'a> Resolution<'a> {
         if let Some(n) = parse_number(s) {
             return Ok(Expr::Number(n));
         }
-        if s.starts_with('<') && s.ends_with('>') {
-            let inner = s[1..s.len() - 1].trim();
+        if let Ok((name, global)) = parse_reference(s) {
+            return Ok(self.symbol(name, global));
+        }
+        if let Some(t) = s.strip_prefix('@') {
+            return Ok(Expr::Param {
+                name: parse_name(t)?,
+                boolean: false,
+            });
+        }
+        if s.starts_with('\'') {
+            return parse_menu(s).map(Expr::Menu);
+        }
+        if s.starts_with('(') {
+            let inner = wrapped(s, '(', ')')?.trim();
+            if inner.is_empty() {
+                return Err(Error::new("圆括号输入不能为空"));
+            }
+            if let Some(value) = self.arithmetic(s, true)? {
+                return Ok(value);
+            }
+            return Ok(Expr::Call(Box::new(self.parse(inner, Shape::Reporter)?)));
+        }
+        if s.starts_with('<') {
+            let inner = wrapped(s, '<', '>')?.trim();
             if inner == "true" {
                 return Ok(Expr::Bool(true));
             }
@@ -280,40 +439,101 @@ impl<'a> Resolution<'a> {
                     boolean: true,
                 });
             }
+            return Ok(Expr::Call(Box::new(self.parse(s, Shape::Boolean)?)));
         }
-        if let Some(t) = s.strip_prefix('$') {
-            let (t, global) = t.strip_prefix("global:").map_or((t, false), |v| (v, true));
-            let (t, list) = t.strip_prefix("list:").map_or((t, false), |v| (v, true));
-            return Ok(Expr::Symbol {
-                name: parse_name(t)?,
-                list,
-                global,
-            });
-        }
-        if let Some(t) = s.strip_prefix('@') {
-            return Ok(Expr::Param {
-                name: parse_name(t)?,
-                boolean: false,
-            });
-        }
-        if s.starts_with('/') {
-            return parse_menu(s).map(Expr::Menu);
-        }
-        let (ns, op, rest) = prefix(s)?;
+        let (ns, op, _) = prefix(s)?;
         if s.starts_with('"') && ns.is_none() && op.is_none() {
             return Ok(Expr::String(parse_string(s)?));
         }
-        let shape = if rest.starts_with('(') {
-            Shape::Reporter
-        } else if rest.starts_with('<') {
-            Shape::Boolean
-        } else {
-            return Err(Error::new(format!("不是合法槽位值: {s}")));
-        };
-        Ok(Expr::Call(Box::new(self.parse(s, shape)?)))
+        if ns.is_some() && op.is_some() {
+            return Ok(Expr::Call(Box::new(self.parse(s, Shape::Reporter)?)));
+        }
+        Err(Error::new(format!("不是合法槽位值: {s}")))
     }
 
-    fn explicit_arguments(&mut self, s: &str) -> Result<Vec<Expr>> {
+    /// Arithmetic is lowered directly to the same templates as explicit nested
+    /// Scratch operators, so validation and code generation share one path.
+    fn arithmetic(&mut self, source: &str, resolve_single_name: bool) -> Result<Option<Expr>> {
+        let Some(inner) = source.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+            return Ok(None);
+        };
+        let Some(node) = ArithmeticParser::parse(inner, 0)? else {
+            return Ok(None);
+        };
+        if let ArithmeticNode::Symbol(name) = node {
+            // Invocation matching itself must not recurse back into matching
+            // this name. Value resolution first preserves registered reporters
+            // such as (计时器), then allows ordinary grouped variables.
+            return if resolve_single_name {
+                self.reporter_or_symbol(source, name).map(Some)
+            } else {
+                Ok(None)
+            };
+        }
+        self.lower_arithmetic(node, 0).map(Some)
+    }
+
+    fn reporter_or_symbol(&mut self, source: &str, name: &str) -> Result<Expr> {
+        match self.parse(
+            source
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .unwrap_or(source),
+            Shape::Reporter,
+        ) {
+            Ok(call) => Ok(Expr::Call(Box::new(call))),
+            // Only a complete absence of matches permits the variable
+            // fallback. Ambiguity and resolution-budget errors remain errors.
+            Err(error) if error.0.starts_with("没有完整匹配的 Reporter 积木:") => {
+                Ok(self.symbol(name.into(), false))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn lower_arithmetic(&mut self, node: ArithmeticNode<'_>, depth: usize) -> Result<Expr> {
+        self.charge()?;
+        if depth >= 128 {
+            return Err(self.limit_error("数学表达式嵌套超过 128 层"));
+        }
+        match node {
+            ArithmeticNode::Value(source) => self.value(source),
+            ArithmeticNode::Symbol(name) => Ok(self.symbol(name.into(), false)),
+            ArithmeticNode::Group(source, inner) => {
+                // Keep established one-word reporters inside arithmetic, while
+                // allowing a parenthesized variable such as (a) in a larger sum.
+                if let ArithmeticNode::Symbol(name) = *inner {
+                    return self.reporter_or_symbol(source, name);
+                }
+                self.lower_arithmetic(*inner, depth + 1)
+            }
+            ArithmeticNode::Binary(operator, left, right) => {
+                let left = self.lower_arithmetic(*left, depth + 1)?;
+                let right = self.lower_arithmetic(*right, depth + 1)?;
+                self.binary_math(operator, left, right)
+            }
+        }
+    }
+
+    fn binary_math(&self, operator: char, left: Expr, right: Expr) -> Result<Expr> {
+        let opcode = match operator {
+            '+' => "operator_add",
+            '-' => "operator_subtract",
+            '*' => "operator_multiply",
+            '/' => "operator_divide",
+            '%' => "operator_mod",
+            _ => unreachable!("arithmetic parser returned an unknown operator"),
+        };
+        let template = self.registry.builtin_template(opcode)?;
+        let args = template
+            .slots()
+            .zip([left, right])
+            .map(|(slot, value)| self.validate(slot, value))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Expr::Call(Box::new(Invocation { template, args })))
+    }
+
+    fn explicit_arguments(s: &str) -> Result<Vec<&str>> {
         let mut args = Vec::new();
         let mut p = skip_ws(s, 0);
         while p < s.len() {
@@ -331,13 +551,10 @@ impl<'a> Resolution<'a> {
                 ));
             };
             let end = *end;
-            args.push(self.value(&s[p..end])?);
+            args.push(&s[p..end]);
             p = skip_ws(s, end);
             if p == s.len() {
                 break;
-            }
-            if !s[p..].starts_with(',') {
-                return Err(Error::new("显式调用参数须用逗号分隔"));
             }
             p = skip_ws(s, p + 1);
             if p == s.len() {
@@ -372,25 +589,7 @@ impl<'a> Resolution<'a> {
                 self.charge()?;
                 match token {
                     Token::Literal(text) => {
-                        let operator = text.trim();
-                        let compact_operator = template.namespace.is_none()
-                            && matches!(
-                                template.opcode.as_str(),
-                                "operator_add"
-                                    | "operator_subtract"
-                                    | "operator_multiply"
-                                    | "operator_divide"
-                                    | "operator_mod"
-                                    | "operator_lt"
-                                    | "operator_gt"
-                                    | "operator_equals"
-                            )
-                            && matches!(operator, "+" | "-" | "*" | "/" | "mod" | "<" | ">" | "=");
-                        let matched = if compact_operator {
-                            match_literal(s, skip_ws(s, state.position), operator)
-                        } else {
-                            match_literal(s, state.position, text)
-                        };
+                        let matched = match_literal(s, skip_ws(s, state.position), text.trim());
                         if let Some(position) = matched {
                             state.position = position;
                             if !text.is_empty() {
@@ -435,7 +634,7 @@ impl<'a> Resolution<'a> {
                             branch.position = end;
                             branch.args.push(atom.to_owned());
                             branch.previous_slot =
-                                Some((end, atom.ends_with(['"', ')', '>', '/', ']'])));
+                                Some((end, atom.ends_with(['"', '\'', ')', '>'])));
                             if !next.contains(&branch) {
                                 next.push(branch);
                             }
@@ -466,8 +665,12 @@ impl<'a> Resolution<'a> {
                 .slots()
                 .zip(&state.args)
                 .map(|(slot, atom)| {
-                    self.value(atom)
-                        .and_then(|value| validate_slot(slot, value))
+                    if raw_sugar_slots(template) {
+                        self.value(atom)
+                            .and_then(|value| self.validate(slot, value))
+                    } else {
+                        self.value_for_slot(atom, slot)
+                    }
                 })
                 .collect();
             match args {
@@ -488,6 +691,106 @@ impl<'a> Resolution<'a> {
             return Err(binding_error.unwrap_or_else(|| Error::new("固定文字后仍有多余输入")));
         }
         Ok(bindings)
+    }
+}
+
+/// A small precedence parser for ordinary parenthesized arithmetic. Nonmath
+/// text returns None, leaving translated and extension templates untouched.
+enum ArithmeticNode<'a> {
+    Value(&'a str),
+    Symbol(&'a str),
+    Group(&'a str, Box<ArithmeticNode<'a>>),
+    Binary(char, Box<ArithmeticNode<'a>>, Box<ArithmeticNode<'a>>),
+}
+
+struct ArithmeticParser<'a> {
+    source: &'a str,
+    position: usize,
+    depth: usize,
+    operations: usize,
+}
+
+impl<'a> ArithmeticParser<'a> {
+    fn parse(source: &'a str, depth: usize) -> Result<Option<ArithmeticNode<'a>>> {
+        if depth >= 128 {
+            return Err(Error::new("数学表达式嵌套超过 128 层"));
+        }
+        let mut parser = Self {
+            source,
+            position: 0,
+            depth,
+            operations: 0,
+        };
+        let value = parser.expression(0)?;
+        parser.position = skip_ws(source, parser.position);
+        Ok(value.filter(|_| parser.position == source.len()))
+    }
+
+    fn expression(&mut self, minimum: u8) -> Result<Option<ArithmeticNode<'a>>> {
+        let Some(mut left) = self.operand()? else {
+            return Ok(None);
+        };
+        loop {
+            self.position = skip_ws(self.source, self.position);
+            let tail = &self.source[self.position..];
+            let (operator, precedence) = match tail.chars().next() {
+                Some(c @ ('+' | '-')) => (c, 1),
+                Some(c @ ('*' | '/' | '%')) => (c, 2),
+                _ => break,
+            };
+            if precedence < minimum {
+                break;
+            }
+            self.operations += 1;
+            if self.operations > 128 {
+                return Err(Error::new("数学表达式超过 128 个运算，请拆分表达式"));
+            }
+            self.position += 1;
+            let Some(right) = self.expression(precedence + 1)? else {
+                return Ok(None);
+            };
+            left = ArithmeticNode::Binary(operator, Box::new(left), Box::new(right));
+        }
+        Ok(Some(left))
+    }
+
+    fn operand(&mut self) -> Result<Option<ArithmeticNode<'a>>> {
+        self.position = skip_ws(self.source, self.position);
+        let start = self.position;
+        let Some(c) = self.source[start..].chars().next() else {
+            return Ok(None);
+        };
+        // Negative literals are already complete atoms; unary minus before a
+        // name/group is the equivalent Scratch expression 0 - value.
+        if c == '-' && scan_atom(self.source, start).is_err() {
+            self.operations += 1;
+            if self.operations > 128 {
+                return Err(Error::new("数学表达式超过 128 个运算，请拆分表达式"));
+            }
+            self.position += 1;
+            let Some(value) = self.operand()? else {
+                return Ok(None);
+            };
+            return Ok(Some(ArithmeticNode::Binary(
+                '-',
+                Box::new(ArithmeticNode::Value("0")),
+                Box::new(value),
+            )));
+        }
+        if let Ok(end) = scan_atom(self.source, start) {
+            self.position = end;
+            let atom = &self.source[start..end];
+            if crate::parser::bare_name_end(atom, 0) == Some(atom.len()) {
+                return Ok(Some(ArithmeticNode::Symbol(atom)));
+            }
+            if c == '('
+                && let Some(inner) = Self::parse(&atom[1..atom.len() - 1], self.depth + 1)?
+            {
+                return Ok(Some(ArithmeticNode::Group(atom, Box::new(inner))));
+            }
+            return Ok(Some(ArithmeticNode::Value(atom)));
+        }
+        Ok(None)
     }
 }
 
@@ -548,31 +851,26 @@ pub(crate) fn quoted_end(s: &str, start: usize) -> Result<usize> {
 }
 
 fn prefix(s: &str) -> Result<(Option<String>, Option<String>, &str)> {
-    let end = if s.starts_with('"') {
-        quoted_end(s, 0)?
-    } else {
-        match crate::parser::bare_namespace_end(s, 0) {
-            Some(end) => end,
-            None => return Ok((None, None, s)),
+    let (end, ns) = if s.starts_with('"') {
+        let end = quoted_end(s, 0)?;
+        if !s[end..].starts_with('.') && !s[end..].starts_with("::") {
+            return Ok((None, None, s));
         }
-    };
-    let suffix = &s[end..];
-    if !suffix.starts_with('.') && !suffix.starts_with("::") {
-        return Ok((None, None, s));
-    }
-    let ns = if s.starts_with('"') {
-        parse_string(&s[..end])?
+        (end, parse_string(&s[..end])?)
     } else {
-        s[..end].into()
+        let Some(end) = crate::parser::bare_namespace_end(s, 0) else {
+            return Ok((None, None, s));
+        };
+        (end, s[..end].into())
     };
-    if suffix.starts_with("::") {
+    if s[end..].starts_with("::") {
         let op_start = end + 2;
         let op_end = quoted_end(s, op_start)?;
         let op = parse_string(&s[op_start..op_end])?;
-        if !s[op_end..].starts_with('.') {
-            return Err(Error::new("显式 opcode 后需要紧接 ."));
+        if !s[op_end..].starts_with('(') {
+            return Err(Error::new("显式 opcode 后需要紧接参数列表 (...)"));
         }
-        Ok((Some(ns), Some(op), &s[op_end + 1..]))
+        Ok((Some(ns), Some(op), &s[op_end..]))
     } else {
         Ok((Some(ns), None, &s[end + 1..]))
     }
@@ -587,13 +885,40 @@ fn wrapped(s: &str, open: char, close: char) -> Result<&str> {
     }
     Ok(&s[open.len_utf8()..s.len() - close.len_utf8()])
 }
-fn content(s: &str, shape: Shape) -> Result<&str> {
-    match shape {
-        Shape::Command => wrapped(s, '[', ']'),
-        Shape::Reporter => wrapped(s, '(', ')'),
-        Shape::Boolean => wrapped(s, '<', '>'),
-        Shape::Hat | Shape::Control => Ok(s),
+/// Slot parentheses describe reporter-capable inputs, including literal defaults.
+pub fn slot_requires_parentheses(slot: &Slot) -> bool {
+    if matches!(slot.arg_type, ArgType::Variable | ArgType::List) {
+        return true;
     }
+    if slot.arg_type == ArgType::Boolean {
+        return false;
+    }
+    if let Some(menu) = &slot.menu {
+        return menu.accept_reporters;
+    }
+    slot.storage == Storage::Input
+}
+
+fn raw_sugar_slots(template: &Template) -> bool {
+    template.namespace.is_none()
+        && matches!(
+            template.opcode.as_str(),
+            "control_if"
+                | "control_if_else"
+                | "control_repeat"
+                | "control_while"
+                | "operator_add"
+                | "operator_subtract"
+                | "operator_multiply"
+                | "operator_divide"
+                | "operator_mod"
+                | "operator_lt"
+                | "operator_gt"
+                | "operator_equals"
+                | "operator_and"
+                | "operator_or"
+                | "operator_not"
+        )
 }
 
 pub(crate) fn validate_slot(slot: &Slot, value: Expr) -> Result<Expr> {
@@ -663,13 +988,8 @@ pub(crate) fn validate_slot(slot: &Slot, value: Expr) -> Result<Expr> {
                 return Err(fail());
             }
         }
-        ArgType::Variable => {
-            if !matches!(&value, Expr::Symbol { list: false, .. }) {
-                return Err(fail());
-            }
-        }
-        ArgType::List => {
-            if !matches!(&value, Expr::Symbol { list: true, .. }) {
+        ArgType::Variable | ArgType::List => {
+            if !matches!(&value, Expr::Symbol { .. }) {
                 return Err(fail());
             }
         }
@@ -852,6 +1172,7 @@ pub fn procedure_template(header: &str, id: &str) -> Result<Template> {
         return Err(Error::new("自制积木定义头不能为空"));
     }
     Ok(Template {
+        branch_count: 0,
         opcode: "procedures_call".into(),
         shape: Shape::Command,
         namespace: None,
@@ -871,19 +1192,17 @@ mod tests {
     #[test]
     fn nested_values_and_boolean_types() {
         let r = Registry::new();
-        let call = r
-            .parse("[将 $score 设为 (1 + (2 * 3))]", Shape::Command, &[])
-            .unwrap();
+        let call = r.parse("score = 1 + 2 * 3", Shape::Command, &[]).unwrap();
         assert_eq!(call.template.opcode, "data_setvariableto");
         assert!(matches!(call.args[1], Expr::Call(_)));
-        assert!(r.value("(1 + 2 * 3)", &[]).is_err());
-        assert!(r.parse("[等待直到 1]", Shape::Command, &[]).is_err());
-        assert!(r.parse("[等待直到 <>]", Shape::Command, &[]).is_ok());
-        assert!(r.parse("[说 <>]", Shape::Command, &[]).is_err());
-        assert!(r.parse("[说 <true>]", Shape::Command, &[]).is_ok());
+        assert!(r.value("(1 + 2 * 3)", &[]).is_ok());
+        assert!(r.parse("等待直到 (1)", Shape::Command, &[]).is_err());
+        assert!(r.parse("等待直到 <>", Shape::Command, &[]).is_ok());
+        assert!(r.parse("说 <>", Shape::Command, &[]).is_err());
+        assert!(r.parse("说 (<true>)", Shape::Command, &[]).is_ok());
     }
     #[test]
-    fn binary_operators_accept_spaces_or_compact_operands_without_precedence() {
+    fn binary_operators_accept_spaces_compact_operands_and_precedence() {
         let registry = Registry::new();
         for (source, opcode) in [
             ("(1 + 2)", "operator_add"),
@@ -894,22 +1213,26 @@ mod tests {
             ("(2*3)", "operator_multiply"),
             ("(8 / 2)", "operator_divide"),
             ("(8/2)", "operator_divide"),
-            ("(7 mod 3)", "operator_mod"),
-            ("(7mod3)", "operator_mod"),
-            ("<$hp < 1>", "operator_lt"),
-            ("<$hp<1>", "operator_lt"),
-            ("<$score > 100>", "operator_gt"),
-            ("<$score>100>", "operator_gt"),
-            ("<$score = 100>", "operator_equals"),
-            ("<$score=100>", "operator_equals"),
+            ("(7 % 3)", "operator_mod"),
+            ("(7%3)", "operator_mod"),
+            ("<hp < 1>", "operator_lt"),
+            ("<hp<1>", "operator_lt"),
+            ("<score > 100>", "operator_gt"),
+            ("<score>100>", "operator_gt"),
+            ("<score = 100>", "operator_equals"),
+            ("<score=100>", "operator_equals"),
             ("(1e-5--2)", "operator_subtract"),
             ("(-1+-2)", "operator_add"),
             ("(.5*-.5)", "operator_multiply"),
             ("(1e+5/2E-1)", "operator_divide"),
             ("((8/2)/(4/2))", "operator_divide"),
-            ("<<$hp<2> 与 <$score>100>>", "operator_and"),
+            ("<<hp<2> 与 <score>100>>", "operator_and"),
             ("<(8/2)>(3-2)>", "operator_gt"),
             ("(8 / # division comment\n 2)", "operator_divide"),
+            ("(1+2*3)", "operator_add"),
+            ("(1+2+3)", "operator_add"),
+            ("(8/2/2)", "operator_divide"),
+            ("(7%3%2)", "operator_mod"),
         ] {
             let Expr::Call(call) = registry
                 .value(source, &[])
@@ -920,6 +1243,8 @@ mod tests {
             assert_eq!(call.template.opcode, opcode, "{source}");
         }
         for source in [
+            "(7mod3)",
+            "(7 mod 3)",
             "(1+*2)",
             "(1-*2)",
             "(1**2)",
@@ -927,15 +1252,10 @@ mod tests {
             "<1=*2>",
             "<1>*2>",
             "<1<*2>",
-            "(1+2*3)",
-            "(1+2+3)",
-            "(8/2/2)",
-            "(7mod3mod2)",
             "<1<2<3>",
             "<1>2=3>",
             "(1++2)",
             "(1//2)",
-            "(7%3)",
         ] {
             assert!(registry.value(source, &[]).is_err(), "{source}");
         }
@@ -944,16 +1264,13 @@ mod tests {
     #[test]
     fn operators_do_not_change_menu_strings_or_explicit_argument_lists() {
         let mut registry = Registry::new();
+        assert_eq!(registry.value("'*'", &[]).unwrap(), Expr::Menu("*".into()));
         assert_eq!(
-            registry.value("/'*'/", &[]).unwrap(),
-            Expr::Menu("*".into())
-        );
-        assert_eq!(
-            registry.value("/'**'/", &[]).unwrap(),
+            registry.value("'**'", &[]).unwrap(),
             Expr::Menu("**".into())
         );
         assert_eq!(
-            registry.value("/'a#b'/", &[]).unwrap(),
+            registry.value("'a#b'", &[]).unwrap(),
             Expr::Menu("a#b".into())
         );
         assert_eq!(
@@ -979,7 +1296,7 @@ mod tests {
         registry.templates.push(extension);
         let call = registry
             .parse(
-                r#"ext::"handle".[(8/2), /'*'/, <$score>100>]"#,
+                r#"ext::"handle"((8 / 2), '*', <score > 100>)"#,
                 Shape::Command,
                 &[],
             )
@@ -987,13 +1304,13 @@ mod tests {
         assert_eq!(call.args[1], Expr::Menu("*".into()));
         assert!(
             registry
-                .parse(r#"ext::"handle".[8 /2/, /'*'/, <>]"#, Shape::Command, &[])
+                .parse(r#"ext::"handle".[8 /2/, '*', <>]"#, Shape::Command, &[])
                 .is_err()
         );
         let procedure = procedure_template("检查 <@ok> @number", "check").unwrap();
         assert!(
             registry
-                .parse("[检查 <@ready> 1]", Shape::Command, &[procedure])
+                .parse("检查 <@ready> (1)", Shape::Command, &[procedure])
                 .is_ok()
         );
     }
@@ -1007,17 +1324,17 @@ mod tests {
         assert!(procedure_template("F @warp @x", "bad").is_err());
         let r = Registry::new();
         assert!(
-            r.parse("[移动 步数: 3 判断: <true>]", Shape::Command, &[a])
+            r.parse("移动 步数: (3) 判断: <true>", Shape::Command, &[a])
                 .is_ok()
         );
     }
     #[test]
     fn menus_map_labels_and_reject_invalid_fields() {
         let r = Registry::new();
-        let call = r.parse("当按下 /'空格'/ 键", Shape::Hat, &[]).unwrap();
+        let call = r.parse("当按下 '空格' 键", Shape::Hat, &[]).unwrap();
         assert_eq!(call.args, vec![Expr::Menu("space".into())]);
         assert!(r.parse("当按下 \"space\" 键", Shape::Hat, &[]).is_err());
-        assert!(r.parse("当按下 /'not-a-key'/ 键", Shape::Hat, &[]).is_err());
+        assert!(r.parse("当按下 'not-a-key' 键", Shape::Hat, &[]).is_err());
     }
     #[test]
     fn nested_boolean_values_do_not_consume_the_following_slot() {
@@ -1026,7 +1343,7 @@ mod tests {
         template.shape = Shape::Boolean;
         registry.templates.push(template);
         let call = registry
-            .parse("<选择 <@ready> 1>", Shape::Boolean, &[])
+            .parse("<选择 <@ready> (1)>", Shape::Boolean, &[])
             .unwrap();
         assert_eq!(
             call.args,
@@ -1039,7 +1356,7 @@ mod tests {
             ]
         );
         let call = registry
-            .parse("<选择 <@ready> <2 > 1>>", Shape::Boolean, &[])
+            .parse("<选择 <@ready> (<2 > 1>)>", Shape::Boolean, &[])
             .unwrap();
         assert_eq!(call.args.len(), 2);
         assert!(matches!(&call.args[1], Expr::Call(call) if call.template.opcode == "operator_gt"));
@@ -1059,19 +1376,19 @@ mod tests {
             registry.templates.push(template);
         }
         let error = registry
-            .parse("ext.[选择 <@number > 1>]", Shape::Command, &[])
+            .parse("ext.选择 (<@number > 1>)", Shape::Command, &[])
             .unwrap_err();
         assert!(error.to_string().contains("歧义"), "{error}");
         assert!(
             registry
-                .parse(r#"ext::"first".[<@number > 1>]"#, Shape::Command, &[])
+                .parse(r#"ext::"first"((<@number > 1>))"#, Shape::Command, &[])
                 .is_ok()
         );
     }
 
     #[test]
     fn boolean_parameter_declarations_do_not_consume_following_literal_text() {
-        let template = procedure_template("测试 <@ready> 1> @number", "literal").unwrap();
+        let template = procedure_template("测试 <@ready> > 1 @number", "literal").unwrap();
         let slots: Vec<_> = template.slots().map(|slot| slot.name.as_str()).collect();
         assert_eq!(slots, ["ready", "number"]);
     }
@@ -1138,16 +1455,16 @@ mod tests {
         second.procedure = Some("second".into());
         for template in [&first, &second] {
             let Expr::Call(call) = registry
-                .value("(读取 1)", std::slice::from_ref(template))
+                .value("(读取 (1))", std::slice::from_ref(template))
                 .unwrap()
             else {
                 panic!("expected custom reporter")
             };
             assert_eq!(call.template.procedure, template.procedure);
         }
-        assert!(registry.value("(读取 1)", &[]).is_err());
+        assert!(registry.value("(读取 (1))", &[]).is_err());
         registry.templates.push(first);
-        assert!(registry.value("(读取 1)", &[]).is_ok());
+        assert!(registry.value("(读取 (1))", &[]).is_ok());
     }
 
     #[test]
@@ -1155,7 +1472,7 @@ mod tests {
         let registry = Registry::new();
         let mut resolution = Resolution::new(&registry, &[]);
         resolution.work = 100_000;
-        let error = resolution.parse("[说 1]", Shape::Command).unwrap_err();
+        let error = resolution.parse("说 (1)", Shape::Command).unwrap_err();
         assert!(error.0.contains("工作量限制"));
         assert_eq!(resolution.value("1").unwrap_err().0, error.0);
     }
@@ -1169,9 +1486,9 @@ mod tests {
         template.procedure = None;
         registry.templates.push(template);
         for source in [
-            "ext::\"choose\".[<@flag>, 1]",
-            "ext::\"choose\".[<@flag > 1>, 2]",
-            "ext::\"choose\".[<@flag> # before comma # , <1 > 0>]",
+            "ext::\"choose\"(<@flag>, (1))",
+            "ext::\"choose\"(<@flag > 1>, (2))",
+            "ext::\"choose\"(<@flag> # before comma # , (<1 > 0>))",
         ] {
             assert_eq!(
                 registry
@@ -1184,9 +1501,9 @@ mod tests {
             );
         }
         for source in [
-            "ext::\"choose\".[<@flag> 1]",
-            "ext::\"choose\".[<@flag>, 1,]",
-            "ext::\"choose\".[<@flag>,, 1]",
+            "ext::\"choose\"(<@flag> (1))",
+            "ext::\"choose\"(<@flag>, (1),)",
+            "ext::\"choose\"(<@flag>,, (1))",
         ] {
             assert!(
                 registry.parse(source, Shape::Command, &[]).is_err(),

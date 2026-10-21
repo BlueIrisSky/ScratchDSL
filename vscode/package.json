@@ -2,7 +2,7 @@
   "name": "scratchdsl",
   "displayName": "ScratchDSL",
   "description": "ScratchDSL 语法高亮、诊断、补全与工程构建。",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "scratchdsl",
   "license": "MIT",
   "repository": {

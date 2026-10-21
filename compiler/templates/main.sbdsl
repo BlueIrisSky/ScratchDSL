@@ -1,5 +1,5 @@
-@sprite "main" {
-    @init {
+sprite "main":
+    init:
         x: -100
         y: 0
         size: 100
@@ -10,5 +10,3 @@
                 path: "../assets/sbdsl.svg"
             }
         ]
-    }
-}

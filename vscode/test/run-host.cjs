@@ -5,7 +5,7 @@ const { createWriteStream } = require('node:fs');
 const { spawn } = require('node:child_process');
 const { downloadAndUnzipVSCode, runTests } = require('@vscode/test-electron');
 
-const source = '@var score = 0\n@sprite "玩家" {\n    @init { x: 0 }\n    当绿旗被点击 {\n        [将 $score 增加 1]\n    }\n}\nimport module\n';
+const source = "score = 0\nsprite \"玩家\":\n    init:\n        x: 0\n    start:\n        score += 1\nimport module\n";
 
 function launch(executable, args, env, log) {
   return new Promise((resolve, reject) => {
@@ -74,7 +74,7 @@ async function main() {
       await fs.mkdir(path.join(profile, 'User'), { recursive: true });
       await fs.writeFile(path.join(workspace, 'src', 'main.sbdsl'), source);
       // This module cannot build alone: its add depends on the entry creating the sprite first.
-      await fs.writeFile(path.join(workspace, 'src', 'module.sbdsl'), "@sprite \"玩家\" add { 当按下 /'space'/ 键 { [移动 1 步] } }\n");
+      await fs.writeFile(path.join(workspace, 'src', 'module.sbdsl'), "sprite \"玩家\" add:\n    当按下 'space' 键:\n        移动(1)步\n");
       await fs.writeFile(path.join(workspace, 'sbdsl.buildsb'),
         '# 工程配置：裸字段名，换行分隔\nentry: "./src/main.sbdsl"\noutput: "./dist/工程.sb3"\nextensions: []\n');
       await fs.writeFile(path.join(profile, 'User', 'settings.json'), JSON.stringify({
@@ -115,7 +115,6 @@ async function main() {
           workspace, '--user-data-dir=' + profile,
           '--extensions-dir=' + extensions,
           ...(!installed ? ['--disable-extensions'] : []),
-          '--disable-extension=github.copilot', '--disable-extension=github.copilot-chat',
           '--skip-welcome', '--skip-release-notes', '--disable-updates', '--disable-gpu-sandbox',
           '--no-sandbox', ...(mode === 'trusted' ? ['--disable-workspace-trust'] : [])
         ]

@@ -44,7 +44,17 @@ impl Diagnostics {
         context: &Context,
         span: &Span,
     ) -> Option<CheckedCall> {
-        match binder.registry.parse(source, shape, &context.visible) {
+        let parsed = binder
+            .parse_invocation(source, shape, context)
+            .or_else(|typed_error| {
+                // An invalid data type must not hide independent parameter errors
+                // in the same call. Typed parsing still decides valid ambiguities.
+                binder
+                    .registry
+                    .parse(source, shape, &context.visible)
+                    .map_err(|_| typed_error)
+            });
+        match parsed {
             Ok(mut invocation) => {
                 self.bind_invocation(binder, &mut invocation, context, span);
                 Some(CheckedCall {
@@ -69,10 +79,16 @@ impl Diagnostics {
         if invocation.template.slots().count() != invocation.args.len() {
             self.push(Error::new("积木参数数量与模板不一致").at(span));
         }
-        for expression in &mut invocation.args {
+        for (slot, expression) in invocation.template.slots().zip(&mut invocation.args) {
             if let Expr::Call(call) = expression {
                 self.bind_invocation(binder, call, context, span);
-            } else if let Err(error) = binder.bind_expression(expression, context) {
+            } else if let Err(error) =
+                binder.bind_expression(expression, context, Some(slot.arg_type))
+            {
+                self.push(error.at(span));
+                continue;
+            }
+            if let Err(error) = validate_bound_data_slot(slot, expression) {
                 self.push(error.at(span));
             }
         }
@@ -87,6 +103,20 @@ impl Diagnostics {
     ) {
         for statement in statements {
             match statement {
+                Statement::ListAssignment {
+                    name,
+                    global,
+                    values,
+                    span,
+                } => match binder.list_assignment(name, *global, values, context, span) {
+                    Ok(statements) => {
+                        calls.extend(statements.into_iter().map(|statement| CheckedCall {
+                            invocation: statement.invocation,
+                            span: statement.span,
+                        }))
+                    }
+                    Err(error) => self.push(error),
+                },
                 Statement::Command { source, span } => {
                     if let Some(call) =
                         self.invocation(binder, source, Shape::Command, context, span)
@@ -115,6 +145,25 @@ impl Diagnostics {
                     self.statements(binder, body, context, calls);
                     if let Some(body) = else_body {
                         self.statements(binder, body, context, calls);
+                    }
+                }
+                Statement::ExtensionControl {
+                    header,
+                    branches,
+                    span,
+                } => {
+                    if let Some(call) =
+                        self.invocation(binder, header, Shape::Control, context, span)
+                    {
+                        if let Err(error) =
+                            validate_extension_branches(&call.invocation.template, branches.len())
+                        {
+                            self.push(error.at(span));
+                        }
+                        calls.push(call);
+                    }
+                    for branch in branches {
+                        self.statements(binder, branch, context, calls);
                     }
                 }
             }
@@ -159,31 +208,25 @@ pub(crate) fn diagnose_project(project: &Project, registry: &Registry) -> Vec<Er
         public: project.public_procedures.clone(),
     };
     let mut diagnostics = Diagnostics::default();
+    if let Err(error) = validate_project_data_names(&binder.targets) {
+        diagnostics.push(error);
+    }
+    // Infer all assignment targets before resolving values, including forward
+    // references. Invalid assignments are diagnosed at their original statement.
+    let _ = binder.infer_assignment_types(project);
     let mut procedures = BTreeMap::<String, CheckedProcedure>::new();
-    let scopes: Vec<_> = std::iter::once((None, binder.public.clone()))
-        .chain(
-            binder
-                .targets
-                .iter()
-                .enumerate()
-                .map(|(index, target)| (Some(index), target.procedures.clone())),
-        )
-        .collect();
-    for (scope, definitions) in scopes {
+    for (scope, definitions) in std::iter::once((None, project.public_procedures.as_slice())).chain(
+        std::iter::once(&project.stage)
+            .chain(&project.sprites)
+            .enumerate()
+            .map(|(index, target)| (Some(index), target.procedures.as_slice())),
+    ) {
         let mut signatures = BTreeSet::new();
         for definition in definitions {
             if !signatures.insert(definition.template.signature()) {
                 diagnostics.push(Error::new("同一作用域存在重复自制积木签名").at(&definition.span));
             }
-            let mut names = BTreeSet::new();
-            if definition
-                .template
-                .slots()
-                .any(|slot| !names.insert(slot.name.clone()))
-            {
-                diagnostics.push(Error::new("自制积木参数名称重复").at(&definition.span));
-            }
-            let context = binder.context(scope, Some(&definition));
+            let context = binder.context(scope, Some(definition));
             let mut calls = Vec::new();
             diagnostics.statements(&mut binder, &definition.body, &context, &mut calls);
             // Private procedures are emitted on their owner even when uncalled.
@@ -191,7 +234,7 @@ pub(crate) fn diagnose_project(project: &Project, registry: &Registry) -> Vec<Er
             if let Some(index) = scope {
                 diagnostics.calls_target(&calls, index);
             }
-            let Some(id) = definition.template.procedure else {
+            let Some(id) = definition.template.procedure.clone() else {
                 diagnostics.push(Error::new("自制积木缺少源符号 ID").at(&definition.span));
                 continue;
             };
@@ -203,7 +246,7 @@ pub(crate) fn diagnose_project(project: &Project, registry: &Registry) -> Vec<Er
                 Entry::Vacant(entry) => {
                     entry.insert(CheckedProcedure {
                         scope,
-                        span: definition.span,
+                        span: definition.span.clone(),
                         calls,
                     });
                 }
@@ -211,16 +254,19 @@ pub(crate) fn diagnose_project(project: &Project, registry: &Registry) -> Vec<Er
         }
     }
 
-    for index in 0..binder.targets.len() {
+    for (index, target) in std::iter::once(&project.stage)
+        .chain(&project.sprites)
+        .enumerate()
+    {
         let context = binder.context(Some(index), None);
         let mut calls = Vec::new();
-        for (header, body, span) in binder.targets[index].scripts.clone() {
+        for (header, body, span) in &target.scripts {
             if let Some(call) =
-                diagnostics.invocation(&mut binder, &header, Shape::Hat, &context, &span)
+                diagnostics.invocation(&mut binder, header, Shape::Hat, &context, span)
             {
                 calls.push(call);
             }
-            diagnostics.statements(&mut binder, &body, &context, &mut calls);
+            diagnostics.statements(&mut binder, body, &context, &mut calls);
         }
         diagnostics.calls_target(&calls, index);
 
@@ -271,27 +317,23 @@ mod tests {
     #[test]
     fn continues_after_bad_hats_conditions_and_independent_commands() {
         let project = load(
-            r#"
-未知事件 {
-    [第一处未知积木]
-    如果 1 那么 {
-        [将 1 加入 $list:then_missing]
-    } 否则 {
-        [将 2 加入 $list:else_missing]
-    }
-    [将 $value 设为 @outside]
-}
-当绿旗被点击 {
-    [第二处未知积木]
-    [移动 1 步]
-}
+            r#"未知事件:
+    第一处未知积木
+    if 1:
+        将 (1) 加入 (then_missing)
+    else:
+        将 (2) 加入 (else_missing)
+    value = @outside
+start:
+    第二处未知积木
+    移动 (1) 步
 "#,
         );
         let errors = diagnose_project(&project, &Registry::new());
         for expected in [
             "未知事件",
             "第一处未知积木",
-            "如果 1 那么",
+            "if 1",
             "then_missing",
             "else_missing",
             "outside",
@@ -310,13 +352,12 @@ mod tests {
     #[test]
     fn reports_each_bad_reference_and_checks_parameter_types() {
         let project = load(
-            r#"
-定义自制积木 检查 @n <@ok> {
-    [将 $implicit 设为 (@first + @second)]
-    如果 <@n> 那么 {}
-    [等待 @ok 秒]
-    [将 1 加入 $list:missing]
-}
+            r#"def 检查 @n <@ok>:
+    implicit = (@first + @second)
+    if <@n>:
+        pass
+    等待 (@ok) 秒
+    将 (1) 加入 (missing)
 "#,
         );
         let errors = messages(&project);
@@ -344,7 +385,7 @@ mod tests {
 
     #[test]
     fn target_errors_survive_reference_errors_in_the_same_call() {
-        let project = load("当绿旗被点击 { [移动 @missing 步] }");
+        let project = load("start:\n    移动 (@missing) 步");
         let errors = messages(&project);
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(
@@ -358,23 +399,20 @@ mod tests {
     #[test]
     fn recursive_public_calls_are_checked_once_on_each_target() {
         let project = load(
-            r#"
-定义自制积木 甲 {
-    [乙]
-    [移动 1 步]
-}
-定义自制积木 乙 {
-    [甲]
-    [将 $x 设为 (x 坐标)]
-}
-当绿旗被点击 {
-    [甲]
-    [甲]
-}
-@sprite "玩家" {
-    @init {}
-    当绿旗被点击 { [乙] }
-}
+            r#"def 甲:
+    乙
+    移动 (1) 步
+def 乙:
+    甲
+    x = (x 坐标)
+start:
+    甲
+    甲
+sprite "玩家":
+    init:
+        pass
+    start:
+        乙
 "#,
         );
         let errors = messages(&project);
@@ -394,24 +432,24 @@ mod tests {
     #[test]
     fn public_lexical_scope_and_private_shadowing_match_strict_binding() {
         let project = load(
-            r#"
-@list logs = []
-定义自制积木 甲 {
-    [将 1 加入 $list:logs]
-    [乙]
-}
-定义自制积木 乙 { [甲] }
-定义自制积木 未调用的移动 { [移动 1 步] }
-@sprite "玩家" {
-    @init {}
-    @list local = []
-    定义自制积木 甲 { [将 2 加入 $list:local] }
-    当绿旗被点击 {
-        [甲]
-        [乙]
-        [将 $implicit 设为 1]
-    }
-}
+            r#"logs = {}
+def 甲:
+    将 (1) 加入 (logs)
+    乙
+def 乙:
+    甲
+def 未调用的移动:
+    移动 (1) 步
+sprite "玩家":
+    init:
+        pass
+    local = {}
+    def 甲:
+        将 (2) 加入 (local)
+    start:
+        甲
+        乙
+        implicit = 1
 "#,
         );
         let registry = Registry::new();
@@ -425,19 +463,24 @@ mod tests {
         let errors = diagnose_project(&project, &registry);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].0.contains("logs"));
-        assert_eq!(
-            bind_project(&project, &registry).err().unwrap().0,
-            errors[0].0
+        // Typed template selection adds matching context to the strict error;
+        // recovery still reports the missing list while checking other slots.
+        let strict = bind_project(&project, &registry).err().unwrap().0;
+        assert!(
+            strict.contains("logs") && strict.contains("未声明"),
+            "{strict}"
         );
     }
 
     #[test]
     fn duplicate_procedure_headers_do_not_hide_body_errors() {
         let mut project = load(
-            r#"
-定义自制积木 同名 @first { [将 1 加入 $list:one] }
-定义自制积木 另一名称 @second { [将 2 加入 $list:two] }
-定义自制积木 后续 { [将 3 加入 $list:three] }
+            r#"def 同名 @first:
+    将 (1) 加入 (one)
+def 另一名称 @second:
+    将 (2) 加入 (two)
+def 后续:
+    将 (3) 加入 (three)
 "#,
         );
         // IDs and slots normally come from the loader. Exercise a partially
@@ -462,16 +505,18 @@ mod tests {
     #[test]
     fn private_procedures_are_checked_even_when_unused() {
         let project = load(
-            r#"
-定义自制积木 公共 { [等待 1 秒] }
-@sprite "玩家" {
-    @init {}
-    定义自制积木 私有 { [公共] }
-}
-@sprite "另一角色" {
-    @init {}
-    定义自制积木 私有 { [公共] }
-}
+            r#"def 公共:
+    等待 (1) 秒
+sprite "玩家":
+    init:
+        pass
+    def 私有:
+        公共
+sprite "另一角色":
+    init:
+        pass
+    def 私有:
+        公共
 "#,
         );
         let mut registry = Registry::new();

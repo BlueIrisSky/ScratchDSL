@@ -42,16 +42,19 @@ struct AnalysisOutput {
     registries: BTreeMap<String, Registry>,
 }
 
-fn analyze(snapshot: Snapshot, cache: &mut AnalysisCache) -> AnalysisOutput {
-    let overlays: BTreeMap<_, _> = snapshot
-        .documents
+fn document_overlays(documents: &BTreeMap<String, Document>) -> BTreeMap<PathBuf, String> {
+    documents
         .values()
         .filter_map(|doc| {
             doc.path
                 .as_ref()
                 .map(|path| (path.clone(), doc.source.clone()))
         })
-        .collect();
+        .collect()
+}
+
+fn analyze(snapshot: Snapshot, cache: &mut AnalysisCache) -> AnalysisOutput {
+    let mut sources = document_overlays(&snapshot.documents);
     let mut output = AnalysisOutput {
         revision: snapshot.revision,
         diagnostics: BTreeMap::new(),
@@ -63,7 +66,7 @@ fn analyze(snapshot: Snapshot, cache: &mut AnalysisCache) -> AnalysisOutput {
         .filter(|doc| matches!(doc.language.as_str(), "sbdsl" | "sbdsl-build"))
         .filter_map(|doc| doc.path.clone())
         .collect::<Vec<_>>();
-    let results = analysis::analyze_documents(&paths, &overlays, cache, snapshot.allow_extensions);
+    let results = analysis::analyze_documents(&paths, &sources, cache, snapshot.allow_extensions);
     for (uri, doc) in &snapshot.documents {
         if !matches!(doc.language.as_str(), "sbdsl" | "sbdsl-build") {
             continue;
@@ -87,11 +90,11 @@ fn analyze(snapshot: Snapshot, cache: &mut AnalysisCache) -> AnalysisOutput {
                 else {
                     continue;
                 };
-                let source = opened
-                    .map(|(_, doc)| doc.source.clone())
-                    .unwrap_or_else(|| std::fs::read_to_string(&path).unwrap_or_default());
+                let source = sources
+                    .entry(path.clone())
+                    .or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_default());
                 let value = json!({
-                    "range": {"start": text::position(&source, diagnostic.start), "end": text::position(&source, diagnostic.end)},
+                    "range": {"start": text::position(source, diagnostic.start), "end": text::position(source, diagnostic.end)},
                     "severity": diagnostic.severity,
                     "source": "ScratchDSL", "message": diagnostic.message
                 });
@@ -172,7 +175,7 @@ fn serve(connection: &Connection) -> Result<()> {
         "capabilities": {
             "positionEncoding": "utf-16",
             "textDocumentSync": {"openClose": true, "change": 1, "save": {"includeText": false}},
-            "completionProvider": {"resolveProvider": false, "triggerCharacters": ["[", "(", "<", "$", "@", ":", ".", "/", " "]}
+            "completionProvider": {"resolveProvider": false, "triggerCharacters": ["(", "<", "@", ":", ".", "/", " ", "+", "-", "*", "%", "=", ">"]}
         },
         "serverInfo": {"name": "ScratchDSL", "version": env!("CARGO_PKG_VERSION")}
     })).map_err(|e| Error::new(e.to_string()))?;
@@ -222,7 +225,8 @@ fn event_loop(
             if shutdown || output.revision != revision {
                 continue;
             }
-            for uri in published.difference(&output.diagnostics.keys().cloned().collect()) {
+            let current = output.diagnostics.keys().cloned().collect();
+            for uri in published.difference(&current) {
                 publish(
                     connection,
                     uri,
@@ -230,7 +234,7 @@ fn event_loop(
                     documents.get(uri).map(|d| d.version),
                 )?;
             }
-            published = output.diagnostics.keys().cloned().collect();
+            published = current;
             for (uri, diagnostics) in output.diagnostics {
                 publish(
                     connection,
@@ -388,18 +392,10 @@ fn respond(
             if doc.language == "sbdsl-build" {
                 return completion::complete_config(&doc.source, position);
             }
-            let Some(cursor) = completion::byte_offset(&doc.source, position) else {
+            let Some(cursor) = text::byte_offset(&doc.source, position) else {
                 return Vec::new();
             };
-            let overlays = documents
-                .values()
-                .filter_map(|document| {
-                    document
-                        .path
-                        .as_ref()
-                        .map(|path| (path.clone(), document.source.clone()))
-                })
-                .collect();
+            let overlays = document_overlays(documents);
             let symbols = symbols::collect(doc.path.as_deref(), &doc.source, &overlays, cursor);
             completion::complete_with_symbols(
                 &doc.source,

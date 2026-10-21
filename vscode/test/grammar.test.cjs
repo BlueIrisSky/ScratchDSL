@@ -54,370 +54,340 @@ function menu(row, text, occurrence = 0) {
   let start = -1;
   for (let index = 0; index <= occurrence; index++) start = row.line.indexOf(text, start + 1);
   assert(start >= 0, 'missing ' + text + ' in ' + row.line);
-  assert(text.startsWith("/'") && text.endsWith("'/"), 'complete menu: ' + text);
+  assert(text.startsWith("'") && text.endsWith("'"), 'complete menu: ' + text);
   for (const [position, boundary] of [[start, 'begin'], [start + text.length - 1, 'end']]) {
     const scopes = scopesAt(row, position);
     assert(scopes.includes('meta.menu.sbdsl'), text + ': ' + scopes);
     assert(scopes.includes(`punctuation.definition.menu.${boundary}.sbdsl`), text + ': ' + scopes);
-    assert(!scopes.some(scope => scope.startsWith('string.')), 'menu slash inherits a string: ' + scopes);
+    assert(!scopes.some(scope => scope.startsWith('string.')), 'menu quote inherits content scope: ' + scopes);
   }
   for (let position = start + 1; position < start + text.length - 1; position++) {
     const scopes = scopesAt(row, position);
-    assert(scopes.includes('string.quoted.other.menu.sbdsl'), text + ': ' + scopes);
+    assert(scopes.includes('string.quoted.single.menu.sbdsl'), text + ': ' + scopes);
     assert(!scopes.some(scope => scope.startsWith('punctuation.definition.menu.')), text + ': ' + scopes);
   }
 }
 function has(row, text, scope, occurrence = 0) {
-  assert(scopes(row, text, occurrence).includes(scope), text + ': ' + scopes(row, text, occurrence));
+  const actual = scopes(row, text, occurrence);
+  assert(actual.includes(scope), text + ': ' + actual);
 }
-function lacks(row, text, prefix) {
-  assert(!scopes(row, text).some(scope => scope.startsWith(prefix)), text + ': ' + scopes(row, text));
+function lacks(row, text, prefix, occurrence = 0) {
+  const actual = scopes(row, text, occurrence);
+  assert(!actual.some(scope => scope.startsWith(prefix)), text + ': ' + actual);
 }
 
 test('hash comments distinguish line, inline and multiline blocks', () => {
-  const lines = tokenize('# 行注释\n[说 1] # 中间 # [说 2]\n  #  \n多行\n结束 # [说 3]\n[说 "#字符串"]');
-  has(lines[0], '行注释', 'comment.line.number-sign.sbdsl');
-  has(lines[1], '中间', 'comment.block.sbdsl');
-  lacks(lines[1], '2', 'comment.');
-  has(lines[3], '多行', 'comment.block.sbdsl');
-  lacks(lines[4], '3', 'comment.');
-  has(lines[5], '#字符串', 'string.quoted.double.sbdsl');
+  const rows = tokenize('# 行注释\n说(1) # 中间 #\n  #\n多行\n结束 # 说(3)\n说("#字符串")');
+  has(rows[0], '行注释', 'comment.line.number-sign.sbdsl');
+  has(rows[1], '中间', 'comment.block.sbdsl');
+  has(rows[3], '多行', 'comment.block.sbdsl');
+  lacks(rows[4], '3', 'comment.');
+  has(rows[5], '#字符串', 'string.quoted.double.sbdsl');
 });
 
 test('menus retain hashes, stars, empty values and quoted slash content', () => {
-  const [line] = tokenize("[说 /'选项'/] [说 /''/] [说 /'*'/] [说 /'#'/]\n");
-  for (const value of ["/'选项'/", "/''/", "/'*'/", "/'#'/"]) menu(line, value);
-  const [quoted] = tokenize("\"自定义拓展\".[模式 /'a/b\"#'/]");
-  has(quoted, 'a/b', 'string.quoted.other.menu.sbdsl');
-  lacks(quoted, '#', 'comment.');
-  has(quoted, '"自定义拓展"', 'entity.name.namespace.sbdsl');
+  for (const value of ["'选项'", "''", "'*'", "'#'", "'a/b\"#'"]) {
+    const [row] = tokenize('"自定义拓展".模式' + value);
+    menu(row, value);
+    has(row, '"自定义拓展"', 'entity.name.namespace.sbdsl');
+  }
 });
 
-test('menu delimiters are punctuation while quoted slashes and quotes remain strings', () => {
-  for (const value of ["/'梯度'/", "/''/", "/'*'/", "/'/'/", "/'a/b'/", "/'a\"/#'/"]) {
-    const [line] = tokenize('"scratch-tensor-extension".(获取 Tensor "W" 的 ' + value + ')');
-    menu(line, value);
-    has(line, ')', 'punctuation.definition.reporter.end.sbdsl');
-    if (value.startsWith("/'")) {
-      const start = line.line.indexOf(value);
-      assert(scopesAt(line, start + 1).includes('punctuation.definition.string.begin.sbdsl'));
-      assert(scopesAt(line, start + value.length - 2).includes('punctuation.definition.string.end.sbdsl'));
-    }
+test('menu delimiters remain punctuation in scalar inputs and static menu fields', () => {
+  for (const value of ["'梯度'", "''", "'*'", "'/'", "'a/b'", "'a\"/#'"]) {
+    const [row] = tokenize('说("scratch-tensor-extension".获取 Tensor("W")的' + value + ')');
+    menu(row, value);
+    has(row, ')', 'punctuation.definition.reporter.end.sbdsl');
   }
-  const [literalSlash] = tokenize("[说 /'/'/]");
-  has(literalSlash, '/', 'string.quoted.single.menu.sbdsl', 1);
-  assert(!scopes(literalSlash, '/', 1).some(scope => scope.startsWith('punctuation.definition.menu.')));
 });
 
 test('menus require single quotes and use JSON escapes plus escaped apostrophes', () => {
-  const value = String.raw`/'a\'b\n\r\t\b\f\u732b\/\\\"#()<>/"'/`;
-  const [line] = tokenize('[说 ' + value + '] [移动 1 步]');
-  menu(line, value);
+  const value = String.raw`'a\'b\n\r\t\b\f\u732b\/\\\"#()<>/"'`;
+  const [row] = tokenize('模式' + value);
+  menu(row, value);
   for (const escape of [String.raw`\'`, String.raw`\n`, String.raw`\r`, String.raw`\t`,
     String.raw`\b`, String.raw`\f`, String.raw`\u732b`, String.raw`\/`, String.raw`\\`, String.raw`\"`]) {
-    has(line, escape, 'constant.character.escape.sbdsl');
+    has(row, escape, 'constant.character.escape.sbdsl');
   }
-  lacks(line, '#', 'comment.');
-  has(line, '移动', 'support.function.command.sbdsl');
+  lacks(row, '#', 'comment.');
   for (const legacy of ['/space/', '//', '/*/', '/"space"/']) {
-    const [row] = tokenize('[说 ' + legacy + ']');
-    assert(!row.tokens.some(token => token.scopes.includes('meta.menu.sbdsl')), legacy);
+    const [row] = tokenize('模式' + legacy);
+    assert(!row.tokens.some(token => token.scopes.includes('meta.menu.sbdsl')));
   }
-  const [invalid] = tokenize(String.raw`[说 /'bad\q'/]`);
+  const [invalid] = tokenize(String.raw`模式'bad\q'`);
   has(invalid, String.raw`\q`, 'invalid.illegal.escape.sbdsl');
 });
 
-test('logical words in command and reporter template text keep the surrounding block scopes', () => {
-  const [command] = tokenize("\"scratch-tensor-extension\".[张量 \"A\" 与 \"B\" 进行 /'*'/ 运算 赋值给 \"product\"]");
-  for (const text of ['张量', '与', '进行', '运算', '赋值给']) {
+test('logical words in command and reporter template text retain their text scopes', () => {
+  const [command] = tokenize('ext.张量("A")与("B")进行\'*\'运算赋值给("product")');
+  for (const text of ['张量', '与', '进行', '运算赋值给']) {
     has(command, text, 'support.function.command.sbdsl');
     lacks(command, text, 'keyword.operator.logical.');
   }
-  menu(command, "/'*'/");
-  const [ordinary] = tokenize('[选择 "A" 或 "B" 不成立] (连接 "A" 与 "B" 或 "C" 不成立)');
-  for (const text of ['或', '不成立']) {
-    has(ordinary, text, 'support.function.command.sbdsl');
-    lacks(ordinary, text, 'keyword.operator.logical.');
-    has(ordinary, text, 'support.function.reporter.sbdsl', 1);
+  const [reporter] = tokenize('说(连接("A")与("B")或("C")不成立)');
+  for (const text of ['连接', '与', '或', '不成立']) {
+    has(reporter, text, 'support.function.reporter.sbdsl');
+    lacks(reporter, text, 'keyword.operator.logical.');
   }
-  has(ordinary, '与', 'support.function.reporter.sbdsl');
-  lacks(ordinary, '与', 'keyword.operator.logical.');
 });
 
-test('logical operators are highlighted within boolean expressions and stay isolated from literals', () => {
-  const [line] = tokenize('[说 <<true> 与 <不成立 <false>>>] [说 <<false> 或 <true>>]');
-  for (const text of ['与', '或', '不成立']) {
-    has(line, text, 'keyword.operator.logical.sbdsl');
-    has(line, text, 'meta.block.boolean.sbdsl');
-    lacks(line, text, 'support.function.command.');
-    lacks(line, text, 'support.function.reporter.');
+test('logical operators are highlighted within boolean inputs and isolated from literals', () => {
+  const [row] = tokenize('等待直到<<true>与<不成立<false>>>');
+  for (const text of ['与', '不成立']) {
+    has(row, text, 'keyword.operator.logical.sbdsl');
+    lacks(row, text, 'support.function.command.');
   }
-  const [literal] = tokenize("[说 \"与 或 不成立\"] [说 /'与 或 不成立'/] <与会者>");
+  const [literal] = tokenize('说("与 或 不成立") 模式\'与 或 不成立\'');
   for (const text of ['与', '或', '不成立']) {
     has(literal, text, 'string.quoted.double.sbdsl');
-    has(literal, text, 'string.quoted.other.menu.sbdsl', 1);
+    has(literal, text, 'string.quoted.single.menu.sbdsl', 1);
   }
-  menu(literal, "/'与 或 不成立'/");
-  has(literal, '与会者', 'support.function.boolean.sbdsl');
-  lacks(literal, '与会者', 'keyword.operator.logical.');
 });
 
-test('division and comparison operators do not start menus or boolean brackets', () => {
-  const [line] = tokenize("(8 / (6 / 2)) <$hp < 1> ($hp / 2) ((\"x\") / 2)");
-  has(line, '/', 'keyword.operator.sbdsl');
-  has(line, '/', 'keyword.operator.sbdsl', 1);
-  has(line, "<", 'keyword.operator.sbdsl', 1);
-  has(line, '/', 'keyword.operator.sbdsl', 2);
-  has(line, '/', 'keyword.operator.sbdsl', 3);
-  const [menuLine] = tokenize("[说 /'* abc'/]");
-  menu(menuLine, "/'* abc'/");
-  const [adjacentSlots] = tokenize("[自定义 8 /'*'/]");
-  menu(adjacentSlots, "/'*'/");
+test('division and comparison operators do not start menus or nested boolean inputs', () => {
+  const [row] = tokenize('说(8 / (6 / 2)) <hp < 1> (hp / 2) (("x") / 2)');
+  for (let i = 0; i < 4; i++) has(row, '/', 'keyword.operator.sbdsl', i);
+  has(row, '<', 'keyword.operator.sbdsl', 1);
+  const [menuRow] = tokenize('选择(8)\'* abc\'');
+  menu(menuRow, "'* abc'");
 });
 
 test('init shares build syntax with bare keys and JSON-only escapes', () => {
-  const lines = tokenize([
-    '@init {',
-    '  costumes: [{name:"\\u732b\\t\\/#", path:"../assets/a.svg"}]',
-    '  visible: false',
-    '}',
-    '[说 "\\t"] # DSL escape is invalid'
-  ].join('\n'));
-  has(lines[0], '@init', 'keyword.control.sbdsl');
-  has(lines[1], 'costumes', 'support.type.property-name.json');
-  has(lines[1], 'name', 'support.type.property-name.json');
-  has(lines[1], '\\u732b', 'constant.character.escape.json');
-  has(lines[1], '\\t', 'constant.character.escape.json');
-  lacks(lines[1], '#', 'comment.');
-  has(lines[2], 'false', 'constant.language.json');
-  has(lines[4], '\\t', 'invalid.illegal.escape.sbdsl');
-  lacks(lines[4], '说', 'meta.embedded.block.buildsb');
+  const rows = tokenize('init:\n  costumes: [{name:"\\u732b\\t\\/#", path:"../assets/a.svg"}]\n  visible: false\n\n说("\\t")');
+  has(rows[0], 'init', 'keyword.control.sbdsl');
+  for (const text of ['costumes', 'name']) has(rows[1], text, 'support.type.property-name.json');
+  for (const text of ['\\u732b', '\\t']) has(rows[1], text, 'constant.character.escape.json');
+  lacks(rows[1], '#', 'comment.');
+  has(rows[2], 'false', 'constant.language.json');
+  has(rows[4], '\\t', 'invalid.illegal.escape.sbdsl');
+  lacks(rows[4], '说', 'meta.embedded.block.buildsb');
 });
 
-test('language configuration avoids ambiguous automatic slash/angle/hash insertion', () => {
+test('bare calls use no shape brackets while data configuration keeps array pairing', () => {
   const config = require('../language-configuration.json');
   assert.equal(config.comments, undefined);
   assert(!config.autoClosingPairs.some(pair => ['/', '<'].includes(pair.open)));
+  for (const open of ['(', '[', '{', "'", '"']) assert(config.autoClosingPairs.some(pair => pair.open === open));
+  const [legacy] = tokenize('[移动 10 步]');
+  for (const delimiter of ['[', ']']) has(legacy, delimiter, 'invalid.illegal.delimiter.sbdsl');
+  const [modern] = tokenize('移动(10)步');
+  has(modern, '移动', 'support.function.command.sbdsl');
+  has(modern, '10', 'constant.numeric.sbdsl');
+  has(modern, '步', 'support.function.command.sbdsl');
 });
 
-test('all fixed block text is highlighted while nested values keep their own scopes', () => {
-  const [line] = tokenize("[将 $score 设为 (连接 \"分数\" 和 ($list:记录 的第 1 项))] <碰到 /'边缘'/ ?>");
-  for (const text of ['将', '设为']) has(line, text, 'support.function.command.sbdsl');
-  for (const text of ['连接', '和', '的第', '项']) has(line, text, 'support.function.reporter.sbdsl');
-  for (const text of ['碰到', '?']) has(line, text, 'support.function.boolean.sbdsl');
-  has(line, '$score', 'variable.other.readwrite.sbdsl');
-  has(line, '$list:记录', 'variable.other.array.sbdsl');
-  has(line, '分数', 'string.quoted.double.sbdsl');
-  menu(line, "/'边缘'/");
-  has(line, '1', 'constant.numeric.sbdsl');
-  lacks(line, '分数', 'support.function.');
-});
-
-test('declarations identify role, variable, list and module names including quoted names', () => {
-  const lines = tokenize([
-    'import lib.动作',
-    'import "./模块/移动.sbdsl"',
-    '@sprite "玩家 🐱" add {',
-    '  @global @var 分数１ = -90',
-    '  @var "姓名 🐱" = "玩家"',
-    '  @list "任务 列表" = ["开始", 1]',
-    '}'
-  ].join('\n'));
-  has(lines[0], 'import', 'keyword.control.import.sbdsl');
-  has(lines[0], 'lib.动作', 'entity.name.namespace.module.sbdsl');
-  has(lines[1], './模块/移动.sbdsl', 'entity.name.namespace.module.sbdsl');
-  has(lines[2], '玩家 🐱', 'entity.name.type.sprite.sbdsl');
-  has(lines[2], 'add', 'keyword.control.sbdsl');
-  has(lines[3], '@global', 'storage.modifier.sbdsl');
-  has(lines[3], '@var', 'storage.type.sbdsl');
-  has(lines[3], '分数１', 'variable.other.readwrite.sbdsl');
-  has(lines[3], '-90', 'constant.numeric.sbdsl');
-  has(lines[4], '姓名 🐱', 'variable.other.readwrite.sbdsl');
-  has(lines[4], '玩家', 'string.quoted.double.sbdsl');
-  has(lines[5], '任务 列表', 'variable.other.array.sbdsl');
-  has(lines[5], '开始', 'string.quoted.double.sbdsl');
-  lacks(lines[5], '开始', 'meta.block.command.');
-});
-
-test('references distinguish lists, variables and both parameter shapes', () => {
-  const [line] = tokenize('[使用 $hp $global:hp $list:记录 $global:list:"任务 🐱" @步数 @"用户 名" <@条件> <@"可以 开始">]');
-  for (const text of ['$hp', '$global:hp']) has(line, text, 'variable.other.readwrite.sbdsl');
-  for (const text of ['$list:记录', '$global:list:"任务 🐱"']) has(line, text, 'variable.other.array.sbdsl');
-  for (const text of ['@步数', '@"用户 名"']) has(line, text, 'variable.parameter.sbdsl');
-  for (const text of ['@条件', '@"可以 开始"']) has(line, text, 'variable.parameter.boolean.sbdsl');
-  const namedLikeDirective = tokenize('定义自制积木 播报 @init @var {\n[说\n @init\n]\n[说 @var]\n}');
-  has(namedLikeDirective[0], '@init', 'variable.parameter.sbdsl');
-  has(namedLikeDirective[0], '@var', 'variable.parameter.sbdsl');
-  has(namedLikeDirective[2], '@init', 'variable.parameter.sbdsl');
-  has(namedLikeDirective[2], '@init', 'meta.block.command.sbdsl');
-  has(namedLikeDirective[4], '@var', 'variable.parameter.sbdsl');
-});
-
-test('procedure templates, events and control flow highlight complete fixed text', () => {
-  const lines = tokenize([
-    '定义自制积木 移动并播报 步数: @steps 是否说话: <@say> @warp {',
-    '  如果 <@say> 那么 { [说 @steps] }',
-    '  否则 { [移动 @steps 步] }',
-    '}',
-    '当收到广播 "开始" {',
-    '  循环 2 次 { [移动并播报 步数: 10 是否说话: <true>] }',
-    '}',
-    '当作为克隆体启动时 { [隐藏] }'
-  ].join('\n'));
-  has(lines[0], '定义自制积木', 'keyword.declaration.function.sbdsl');
-  for (const text of ['移动并播报', '步数:', '是否说话:']) has(lines[0], text, 'entity.name.function.sbdsl');
-  has(lines[0], '@steps', 'variable.parameter.sbdsl');
-  has(lines[0], '@say', 'variable.parameter.boolean.sbdsl');
-  has(lines[0], '@warp', 'storage.modifier.sbdsl');
-  for (const text of ['如果', '那么']) has(lines[1], text, 'keyword.control.sbdsl');
-  has(lines[2], '否则', 'keyword.control.sbdsl');
-  has(lines[4], '当收到广播', 'keyword.control.event.sbdsl');
-  has(lines[4], '开始', 'string.quoted.double.sbdsl');
-  for (const text of ['循环', '次']) has(lines[5], text, 'keyword.control.sbdsl');
-  has(lines[5], '移动并播报', 'support.function.command.sbdsl');
-  has(lines[5], 'true', 'constant.language.boolean.sbdsl');
-  has(lines[7], '当作为克隆体启动时', 'keyword.control.event.sbdsl');
-});
-
-test('namespace and explicit opcode calls have distinct scopes in every shape', () => {
-  const lines = tokenize([
-    '"自定义拓展".[移动 10 步]',
-    '[说 ext::"read".($score)]',
-    '如果 "自定义拓展"::"ready".<> 那么 { [说 "好"] }',
-    "ext::\"when\".hat(/'space'/) { [等待 1 秒] }",
-    '"自定义拓展".(x 坐标) 达标 { [说 "到达"] }'
-  ].join('\n'));
-  has(lines[0], '"自定义拓展"', 'entity.name.namespace.sbdsl');
-  has(lines[0], '移动', 'support.function.command.sbdsl');
-  has(lines[1], 'ext', 'entity.name.namespace.sbdsl');
-  has(lines[1], 'read', 'entity.name.function.opcode.sbdsl');
-  has(lines[1], '$score', 'variable.other.readwrite.sbdsl');
-  has(lines[2], 'ready', 'entity.name.function.opcode.sbdsl');
-  has(lines[3], 'hat', 'keyword.control.event.sbdsl');
-  menu(lines[3], "/'space'/");
-  has(lines[4], 'x 坐标', 'support.function.reporter.sbdsl');
-  has(lines[4], '达标', 'keyword.control.event.sbdsl');
-});
-
-test('bare namespaces accept Unicode, hyphens and dots in every extension call shape', () => {
-  const lines = tokenize([
-    'scratch-tensor-extension.[执行计算]',
-    '[说 自定义拓展.min.(结果数量)]',
-    '如果 自定义拓展.<已就绪 ?> 那么 { [说 "好"] }',
-    "自定义拓展-示例::\"when\".hat(/'space'/) { [等待 1 秒] }",
-    '自定义拓展.min.当计算完成 { [说 "完成"] }',
-    '[说 扩展１::"read".(1)]',
-    'scratch-tensor-extension::"clear".[]',
-    '如果 自定义拓展.min::"ready".<> 那么 { [说 "好"] }'
-  ].join('\n'));
-  for (const [index, name] of [[0, 'scratch-tensor-extension'], [1, '自定义拓展.min'], [2, '自定义拓展'],
-    [3, '自定义拓展-示例'], [4, '自定义拓展.min'], [5, '扩展１'], [6, 'scratch-tensor-extension'], [7, '自定义拓展.min']]) {
-    has(lines[index], name, 'entity.name.namespace.sbdsl');
-    lacks(lines[index], name, 'string.');
+test('Python suites and data arrays keep matching indentation rules', () => {
+  const config = require('../language-configuration.json');
+  const indent = new RegExp(config.indentationRules.increaseIndentPattern);
+  for (const text of ['start:', 'if <true>:', 'elif <false>:', 'else:', 'loop 10:', 'while true:',
+    'def 测试 @n: # comment', 'ext.当<true>:', 'items = {', 'runtime: {', 'costumes: [']) {
+    assert(indent.test(text), text);
   }
-  has(lines[0], '执行计算', 'support.function.command.sbdsl');
-  has(lines[1], '结果数量', 'support.function.reporter.sbdsl');
-  has(lines[2], '已就绪', 'support.function.boolean.sbdsl');
-  has(lines[3], 'when', 'entity.name.function.opcode.sbdsl');
-  has(lines[3], 'hat', 'keyword.control.event.sbdsl');
-  has(lines[4], '当计算完成', 'keyword.control.event.sbdsl');
-  has(lines[5], 'read', 'entity.name.function.opcode.sbdsl');
-  has(lines[6], 'clear', 'entity.name.function.opcode.sbdsl');
-  has(lines[7], 'ready', 'entity.name.function.opcode.sbdsl');
-  const [numbers] = tokenize('[说 (1.5-0.25)] [说 ($score-1)] [说 (2.5 / 0.5)]');
-  for (const value of ['1.5', '0.25', '2.5', '0.5']) {
-    has(numbers, value, 'constant.numeric.sbdsl');
-    lacks(numbers, value, 'entity.name.namespace.');
-  }
-  has(numbers, '-', 'keyword.operator.sbdsl');
-  has(numbers, '-', 'keyword.operator.sbdsl', 1);
-  const [bareHat, quotedHat] = tokenize('ext.版本1.0 完成 { [说 "完成"] }\n"ext".版本1.0 完成 { [说 "完成"] }');
-  has(bareHat, 'ext.版本1', 'entity.name.namespace.sbdsl');
-  has(bareHat, '.', 'punctuation.separator.namespace.sbdsl', 1);
-  has(quotedHat, '"ext"', 'entity.name.namespace.sbdsl');
-  has(quotedHat, '版本1.0', 'keyword.control.event.sbdsl');
+  assert(!indent.test('说("text:")'));
+  const dedent = new RegExp(config.indentationRules.decreaseIndentPattern);
+  for (const text of ['    elif <true>:', '    else:', '    }', '    ]']) assert(dedent.test(text), text);
 });
 
-test('subtraction keeps adjacent right namespaces whole after numeric and reference operands', () => {
-  for (const left of ['1', '1.5', '$score', '@参数']) {
-    for (const name of ['ext', 'scratch-tensor-extension', '自定义拓展', '中文-名称.min']) {
-      for (const suffix of ['.(结果值)', '::"number".()']) {
-        const [line] = tokenize(`[说 (${left}-${name}${suffix})]`);
-        has(line, '-', 'keyword.operator.sbdsl');
-        has(line, name, 'entity.name.namespace.sbdsl');
-        const start = line.line.indexOf(name);
-        for (let position = start; position < start + name.length; position++) {
-          assert(scopesAt(line, position).includes('entity.name.namespace.sbdsl'), line.line + ': ' + scopesAt(line, position));
-          assert(!scopesAt(line, position).some(scope => scope.startsWith('keyword.operator.')), line.line);
-        }
-        if (suffix.startsWith('::')) has(line, 'number', 'entity.name.function.opcode.sbdsl');
-        else has(line, '结果值', 'support.function.reporter.sbdsl');
-      }
+test('extension C headers preserve namespaces, typed inputs and repeated branches', () => {
+  const rows = tokenize('start:\n    ext.当<ready = 1>否则(2):\n        score += 1\n    else:\n        score -= 1\n    else:\n        pass\n    "我的 扩展"::"repeat"((count+1)):\n        说(score)\n    ext.普通命令("text:")');
+  for (const i of [1, 7]) {
+    has(rows[i], i === 1 ? 'ext' : '"我的 扩展"', 'meta.control.extension.sbdsl');
+    has(rows[i], ':', i === 1 ? 'punctuation.section.block.begin.sbdsl' : 'punctuation.separator.namespace.sbdsl');
+  }
+  has(rows[1], 'ext', 'entity.name.namespace.sbdsl');
+  has(rows[1], '否则', 'support.function.command.sbdsl');
+  has(rows[1], 'ready', 'variable.other.readwrite.sbdsl');
+  for (const i of [3, 5]) has(rows[i], 'else', 'keyword.control.sbdsl');
+  has(rows[2], '+=', 'keyword.operator.assignment.sbdsl');
+  has(rows[7], 'repeat', 'entity.name.function.opcode.sbdsl');
+  has(rows[8], '说', 'support.function.command.sbdsl');
+  lacks(rows[9], 'ext', 'meta.control.extension.');
+});
+
+test('scalar inputs wrap literals, variable values, reporters and nested arithmetic', () => {
+  for (const source of ['说(a+b-c*d/f%e)', '说((a+b)*(c-d)/f%e)']) {
+    const [row] = tokenize(source);
+    for (const text of ['a', 'b', 'c', 'd', 'f', 'e']) has(row, text, 'variable.other.readwrite.sbdsl');
+    for (const text of ['+', '-', '*', '/', '%']) has(row, text, 'keyword.operator.sbdsl');
+  }
+  const [row] = tokenize('说(连接("你好")和("世界"))');
+  has(row, '说', 'support.function.command.sbdsl');
+  has(row, '连接', 'support.function.reporter.sbdsl');
+  for (const text of ['你好', '世界']) has(row, text, 'string.quoted.double.sbdsl');
+});
+
+test('assignment sugar highlights targets, six operators and unwrapped math', () => {
+  for (const [target, op] of [['score', '='], ['分数', '+='], ['global:score', '-='], ['血量', '*='], ['global:总分', '/='], ['score', '%=']]) {
+    const [row] = tokenize(`    ${target} ${op} a+b-c*d/f%e`);
+    has(row, target, 'variable.other.readwrite.sbdsl');
+    has(row, op, 'keyword.operator.assignment.sbdsl');
+    for (const text of ['a', 'b', 'c', 'd', 'f', 'e']) assert(scopesAt(row, row.line.lastIndexOf(text)).includes('variable.other.readwrite.sbdsl'));
+    for (const text of ['+', '-', '*', '/', '%']) assert(scopesAt(row, row.line.lastIndexOf(text)).includes('keyword.operator.sbdsl'));
+  }
+  const [row] = tokenize('# before # score # target # += bonus # after');
+  has(row, 'score', 'variable.other.readwrite.sbdsl');
+  has(row, '+=', 'keyword.operator.assignment.sbdsl');
+  has(row, 'target', 'comment.block.sbdsl');
+  has(row, 'after', 'comment.line.number-sign.sbdsl');
+});
+
+test('assignment values preserve grouped reporters, booleans, literal text and statement boundaries', () => {
+  const rows = tokenize('score = (连接("a")("b"))\nflag = <score>0>\ntext = "# $score [ ]"\nscore = (\n    8 / (6 / 2)\n)\n移动(1)步');
+  has(rows[0], '连接', 'support.function.reporter.sbdsl');
+  has(rows[1], '>', 'keyword.operator.expression.comparison.sbdsl');
+  has(rows[2], '$score', 'string.quoted.double.sbdsl');
+  has(rows[4], '/', 'keyword.operator.sbdsl');
+  has(rows[6], '移动', 'support.function.command.sbdsl');
+  lacks(rows[6], '移动', 'meta.assignment.');
+});
+
+test('declarations and non-scalar references do not become scalar assignments', () => {
+  for (const text of ['var score = 0', 'list logs = {}', '@param = 1', '(logs) = 1']) {
+    const [row] = tokenize(text);
+    lacks(row, '=', 'meta.assignment.');
+  }
+  const [decl] = tokenize('global:score = 0');
+  has(decl, 'global:score', 'variable.other.readwrite.sbdsl');
+});
+
+test('ordinary identifiers stay bare inside scalar inputs and sugar contexts', () => {
+  const rows = tokenize('移动(speed)步\n说(global:score)\nloop count:\n    if <score > 1>:\n        说(score)');
+  for (const [i, text] of [[0, 'speed'], [1, 'global:score'], [2, 'count'], [3, 'score'], [4, 'score']]) has(rows[i], text, 'variable.other.readwrite.sbdsl');
+  for (const text of ['移动', '步']) has(rows[0], text, 'support.function.command.sbdsl');
+});
+
+test('variable and list identities use typed parenthesized slots', () => {
+  const rows = tokenize('显示变量(score)\n将(score)加入(logs)\n删除(global:logs)的第(1)项\n说((logs)的项目数)');
+  has(rows[0], 'score', 'variable.other.readwrite.sbdsl');
+  has(rows[1], 'score', 'variable.other.readwrite.sbdsl');
+  has(rows[1], 'logs', 'variable.other.array.sbdsl');
+  has(rows[2], 'global:logs', 'variable.other.array.sbdsl');
+  has(rows[3], 'logs', 'variable.other.array.sbdsl');
+});
+
+test('retired data prefixes and quoted data names remain invalid', () => {
+  for (const ref of ['var:score', 'list:logs', 'global:list:logs', 'global:"score"']) {
+    const [row] = tokenize('说(' + ref + ')');
+    has(row, ref, 'invalid.illegal.reference.sbdsl');
+  }
+  for (const declaration of ['"score" = 0', '"logs" = {}']) {
+    const [row] = tokenize(declaration);
+    has(row, declaration.includes('score') ? '"score"' : '"logs"', 'invalid.illegal.identifier.sbdsl');
+  }
+  const [labels] = tokenize('ext.处理 list: (1) var: (2) global: (3)');
+  for (const text of ['list:', 'var:', 'global:']) lacks(labels, text, 'invalid.');
+});
+
+test('registered reporters differ from variable values and hyphenated namespaces', () => {
+  const rows = tokenize('说(计时器)\nscore = 计时器\nscore = score - ext.数字\n说(ext-name.数字)');
+  has(rows[0], '计时器', 'support.function.reporter.sbdsl');
+  has(rows[3], 'ext-name', 'entity.name.namespace.sbdsl');
+  has(rows[2], '-', 'keyword.operator.sbdsl');
+});
+
+test('retired dollar references do not affect string or menu contents', () => {
+  for (const ref of ['$score', '$list:logs', '$global:score', '$"a b"']) {
+    const [row] = tokenize('说(' + ref + ')');
+    has(row, ref, 'invalid.illegal.reference.sbdsl');
+  }
+  const [row] = tokenize('说("$score") 模式\'$list:logs\'');
+  has(row, '$score', 'string.quoted.double.sbdsl');
+  has(row, '$list:logs', 'string.quoted.single.menu.sbdsl');
+});
+
+test('curly list literals and JSON init arrays keep distinct scopes', () => {
+  const rows = tokenize('logs = {1, "a"}\nsprite "玩家":\n    init:\n        costumes: [{name: "猫", path: "a.svg"}]\n    start:\n        将("b")加入(logs)');
+  has(rows[0], '{', 'punctuation.definition.list.begin.sbdsl');
+  has(rows[3], 'costumes', 'support.type.property-name.json');
+  has(rows[4], 'start', 'keyword.control.event.sbdsl');
+  has(rows[5], '加入', 'support.function.command.sbdsl');
+  lacks(rows[5], '加入', 'meta.embedded.');
+});
+
+test('all command text remains colored around typed inputs', () => {
+  const [row] = tokenize('在(2)秒内滑行到 x:(10)y:(20)');
+  for (const text of ['在', '秒内滑行到', 'x:', 'y:']) has(row, text, 'support.function.command.sbdsl');
+  for (const text of ['2', '10', '20']) has(row, text, 'constant.numeric.sbdsl');
+});
+
+test('declarations identify ordinary data names, quoted roles and modules', () => {
+  const rows = tokenize('分数 = 1\n日志 = {}\nsprite "玩家 😀":\n    init:\n        pass\nimport "目录.模块"');
+  has(rows[0], '分数', 'variable.other.readwrite.sbdsl');
+  has(rows[1], '日志', 'variable.other.array.sbdsl');
+  has(rows[2], '玩家', 'entity.name.type.sprite.sbdsl');
+  has(rows[5], '目录.模块', 'entity.name.namespace.module.sbdsl');
+});
+
+test('ordinary and quoted procedure parameter references keep their types', () => {
+  const [row] = tokenize('处理(@steps)(@"步 数")<@ready><@"准备 好">');
+  for (const text of ['@steps', '@"步 数"']) has(row, text, 'variable.parameter.sbdsl');
+  for (const text of ['@ready', '@"准备 好"']) has(row, text, 'variable.parameter.boolean.sbdsl');
+});
+
+test('procedure templates, events and control flow preserve fixed text', () => {
+  const rows = tokenize('def 前进 @n 判断 <@ok> @warp:\n    移动(@n)步\n当按下\'space\'键:\n    if <@ok>:\n        前进(2)<true>\n    elif <false>:\n        pass\n    else:\n        while true:\n            等待(1)秒');
+  has(rows[0], '前进', 'entity.name.function.sbdsl');
+  has(rows[0], '@warp', 'storage.modifier.sbdsl');
+  has(rows[2], '当按下', 'keyword.control.event.sbdsl');
+  for (const i of [3, 5, 7, 8]) has(rows[i], ['if', 'elif', 'else', 'while'][[3,5,7,8].indexOf(i)], 'keyword.control.sbdsl');
+});
+
+test('normal and explicit extension calls place namespaces inside value inputs', () => {
+  const rows = tokenize('ext.移动(10)步\n说(ext.数字)\n等待直到<ext.就绪>\next::"move"((10))\n说(ext::"number"())\n等待直到<ext::"ready"()>');
+  for (const row of rows) has(row, 'ext', 'entity.name.namespace.sbdsl');
+  for (const [i, op] of [[3, 'move'], [4, 'number'], [5, 'ready']]) has(rows[i], op, 'entity.name.function.opcode.sbdsl');
+  for (const old of ['ext.[移动 10 步]', 'ext::"x".[]', 'ext::"x".hat()']) {
+    const [row] = tokenize(old);
+    assert(row.tokens.some(t => t.scopes.some(s => s.startsWith('invalid.illegal.'))), old);
+  }
+});
+
+test('extension namespaces accept Unicode, hyphens, dots and quoted names', () => {
+  for (const ns of ['自定义拓展', 'custom.min', 'tensor-tools', '"我的 扩展 😀"']) {
+    for (const call of [ns + '.移动(1)步', '说(' + ns + '.值)', '<' + ns + '.就绪>', ns + '::"move"((1))']) {
+      const [row] = tokenize(call);
+      has(row, ns, 'entity.name.namespace.sbdsl');
     }
   }
-  const [standalone] = tokenize('scratch-tensor-extension.[执行计算]');
-  for (let position = 0; position < 'scratch-tensor-extension'.length; position++) {
-    assert(scopesAt(standalone, position).includes('entity.name.namespace.sbdsl'));
+});
+
+test('subtraction preserves right-hand namespaces and grouped qualified inputs', () => {
+  for (const source of ['score = 8-ext.数字', 'score = score - ext.数字', '说(8-ext.数字)', '说(@n-ext.数字)']) {
+    const [row] = tokenize(source);
+    has(row, 'ext', 'entity.name.namespace.sbdsl');
+    has(row, '-', 'keyword.operator.sbdsl');
   }
 });
 
-test('keywords inside strings and menus do not become declarations or control flow', () => {
-  const [line] = tokenize("[说 \"@var score 如果 定义自制积木 🐱 #\"] [选择 /'@sprite 当绿旗被点击 #'/]");
-  for (const text of ['@var', '如果', '定义自制积木', '🐱']) {
-    has(line, text, 'string.quoted.double.sbdsl');
-    lacks(line, text, 'keyword.');
-    lacks(line, text, 'variable.');
-  }
-  for (const text of ['@sprite', '当绿旗被点击']) {
-    has(line, text, 'string.quoted.other.menu.sbdsl');
-    lacks(line, text, 'keyword.');
+test('keywords inside strings and menus never become declarations or flow', () => {
+  const [row] = tokenize('说("var list if loop start") 模式\'var list if loop start\'');
+  for (const text of ['var', 'list', 'if', 'loop', 'start']) {
+    has(row, text, 'string.quoted.double.sbdsl');
+    has(row, text, 'string.quoted.single.menu.sbdsl', 1);
   }
 });
 
-test('incomplete strings, menus and quoted references recover at later statements', () => {
-  for (const unfinished of ['[说 "未结束', "[说 /'未结束", "[说 /'未结束", '[说 $"未结束', '[说 $list:"未结束', '[说 @"未结束', '[说 (连接 "a" 和', "[等待直到 <$hp < 1"]) {
-    const lines = tokenize(unfinished + '\n[移动 10 步]\n@var next = 1');
-    has(lines[1], '移动', 'support.function.command.sbdsl');
-    lacks(lines[1], '移动', 'string.');
-    lacks(lines[1], '移动', 'variable.');
-    has(lines[2], 'next', 'variable.other.readwrite.sbdsl');
-    lacks(lines[2], 'next', 'meta.block.command.');
+test('incomplete quotes recover for subsequent bare statements', () => {
+  for (const line of ['说("unfinished', '模式\'unfinished', '说(@"unfinished']) {
+    const rows = tokenize(line + '\n移动(1)步');
+    lacks(rows[1], '移动', 'string.');
+    lacks(rows[1], '移动', 'variable.parameter.');
   }
 });
 
-test('valid multiline blocks, list initializers and block comments preserve context', () => {
-  const lines = tokenize([
-    '[将 $score 设为',
-    '  (连接 "🐱" 和',
-    '    ($list:记录 的第 1 项))',
-    ']',
-    '@list logs = [',
-    '  "a",',
-    '  2',
-    ']',
-    '[说',
-    '#',
-    '@var not_a_declaration = 1',
-    ']',
-    '#',
-    '  "完成"',
-    ']',
-    '[隐藏]'
-  ].join('\n'));
-  has(lines[1], '连接', 'support.function.reporter.sbdsl');
-  has(lines[2], '$list:记录', 'variable.other.array.sbdsl');
-  has(lines[5], 'a', 'string.quoted.double.sbdsl');
-  has(lines[6], '2', 'constant.numeric.sbdsl');
-  has(lines[10], '@var', 'comment.block.sbdsl');
-  has(lines[11], ']', 'comment.block.sbdsl');
-  has(lines[13], '完成', 'string.quoted.double.sbdsl');
-  has(lines[15], '隐藏', 'support.function.command.sbdsl');
-  lacks(lines[15], '隐藏', 'comment.');
+test('multiline typed inputs, list literals and block comments preserve contexts', () => {
+  const rows = tokenize('说(连接(\n    "a"\n)和(\n    "b"\n))\n日志 = {\n    1,\n    "二"\n}\n#\n移动(0)步\n#\n移动(1)步');
+  has(rows[0], '连接', 'support.function.reporter.sbdsl');
+  has(rows[1], 'a', 'string.quoted.double.sbdsl');
+  has(rows[3], 'b', 'string.quoted.double.sbdsl');
+  has(rows[6], '1', 'constant.numeric.sbdsl');
+  has(rows[10], '移动', 'comment.block.sbdsl');
+  has(rows[12], '移动', 'support.function.command.sbdsl');
 });
 
 test('init allows all hash comment forms without hiding later JSON or declarations', () => {
   const lines = tokenize([
-    '@init {',
+    "init:",
     '  # 普通注释',
     '  "x": # 行内 # 10,',
     '  #',
@@ -425,8 +395,8 @@ test('init allows all hash comment forms without hiding later JSON or declaratio
     '  #',
     '  "costumes": [{"name": "猫 🐱", "path": "./猫.svg"}],',
     '  "visible": true',
-    '}',
-    '@var score = 0'
+    '',
+    "score = 0"
   ].join('\n'));
   has(lines[1], '普通注释', 'comment.line.number-sign.sbdsl');
   has(lines[2], '行内', 'comment.block.sbdsl');
@@ -437,16 +407,16 @@ test('init allows all hash comment forms without hiding later JSON or declaratio
   has(lines[7], 'true', 'constant.language.json');
   has(lines[9], 'score', 'variable.other.readwrite.sbdsl');
   lacks(lines[9], 'score', 'meta.embedded.block.buildsb');
-  const [inline] = tokenize('@init # 初始状态 # {"x": 10}');
-  has(inline, '初始状态', 'comment.block.sbdsl');
+  const [header, inline] = tokenize("init: # 初始状态 #\n    \"x\": 10");
+  has(header, '初始状态', 'comment.block.sbdsl');
   has(inline, 'x', 'support.type.property-name.json');
   has(inline, '10', 'constant.numeric.json');
 });
 
-test('division preserves quoted and list reference scopes and supports all operators', () => {
-  const [line] = tokenize("($\"血 量\" / 2) ($list:记录 / 2) (@\"步 数\" / 2) (1 + 2) (2 - 1) (2 * 3) <1 > 0> <1 = 1>");
-  has(line, '$"血 量"', 'variable.other.readwrite.sbdsl');
-  has(line, '$list:记录', 'variable.other.array.sbdsl');
+test('division preserves ordinary data and quoted parameter scopes and supports all operators', () => {
+  const [line] = tokenize("(血量 / 2) (global:总分 / 2) (@\"步 数\" / 2) (1 + 2) (2 - 1) (2 * 3) <1 > 0> <1 = 1>");
+  has(line, '血量', 'variable.other.readwrite.sbdsl');
+  has(line, 'global:总分', 'variable.other.readwrite.sbdsl');
   has(line, '@"步 数"', 'variable.parameter.sbdsl');
   for (let index = 0; index < 3; index++) has(line, '/', 'keyword.operator.sbdsl', index);
   for (const operator of ['+', '-', '*', ">", '=']) has(line, operator, 'keyword.operator.sbdsl');
@@ -455,10 +425,10 @@ test('division preserves quoted and list reference scopes and supports all opera
 test('ordinary infix operators support user examples and compact nested expressions', () => {
   for (const [source, operator] of [
     ['(1 + 2)', '+'], ['(1 - 2)', '-'], ['(2 * 3)', '*'],
-    ['(8 / 2)', '/'], ['(7 mod 3)', 'mod'], ['(7mod3)', 'mod'], ['(7mod(3+2))', 'mod'],
-    ["<$hp < 1>", "<"], ["<$score > 100>", ">"], ['<$score = 100>', '='],
+    ['(8 / 2)', '/'], ["(7 % 3)", "%"], ['(7%3)', "%"], ['(7%(3+2))', "%"],
+    ["<hp < 1>", "<"], ["<score > 100>", ">"], ['<score = 100>', '='],
     ['(1+2)', '+'], ['(1-2)', '-'], ['(2*3)', '*'], ['(8/2)', '/'],
-    ["<$hp<1>", "<"], ["<$score>100>", ">"], ['<$score=100>', '='],
+    ["<hp<1>", "<"], ["<score>100>", ">"], ['<score=100>', '='],
     ['((8/2)/(6/3))', '/'], ["<(1+2)>0>", ">"], ["<@n > 1>", ">"]
   ]) {
     const [line] = tokenize(source);
@@ -470,24 +440,11 @@ test('ordinary infix operators support user examples and compact nested expressi
   }
 });
 
-test('greater-than consumes one operator and preserves nested boolean and later slot boundaries', () => {
-  const [line] = tokenize("[自定义 <1 > 0> 2] ext.<模板 <@ok> 1> [等待直到 <不成立 <$score>100>>]");
-  has(line, ">", 'keyword.operator.sbdsl');
-  for (const occurrence of [1, 2, 3, 5, 6]) has(line, '>', 'punctuation.definition.boolean.end.sbdsl', occurrence);
-  has(line, ">", 'keyword.operator.sbdsl', 4);
-  has(line, '@ok', 'variable.parameter.boolean.sbdsl');
-  has(line, '2', 'constant.numeric.sbdsl');
-  lacks(line, '2', 'meta.block.boolean.');
-  const [missingOperator] = tokenize('<1>');
-  has(missingOperator, '>', 'punctuation.definition.boolean.end.sbdsl');
-  lacks(missingOperator, '>', 'keyword.operator.');
-});
-
 test('comparison operators and surrounding boolean delimiters have distinct scopes', () => {
-  for (const source of ['<$hp < 1>', '<$score > 100>', '<$hp<1>', '<$score>100>',
-    '<(8 / 2) > 1>', '<((1 + 2) * 3) < 10>', '<ext.(返回值) > 1>',
-    '<"< >" > "<">', "</'a>b'/ < /'z'/>"]) {
-    const [line] = tokenize('[测试 ' + source + ' 2]');
+  for (const source of ['<hp < 1>', '<score > 100>', '<hp<1>', '<score>100>',
+    '<(8 / 2) > 1>', '<((1 + 2) * 3) < 10>', '<(ext.返回值) > 1>',
+    '<"< >" > "<">', "<'a>b' < 'z'>"]) {
+    const [line] = tokenize('测试' + source + '(2)');
     const start = line.line.indexOf(source);
     const end = start + source.length - 1;
     assert(scopesAt(line, start).includes('punctuation.definition.boolean.begin.sbdsl'), source);
@@ -501,7 +458,7 @@ test('comparison operators and surrounding boolean delimiters have distinct scop
     const trailing = line.line.lastIndexOf('2');
     assert(!scopesAt(line, trailing).includes('meta.block.boolean.sbdsl'), source);
   }
-  const [nested] = tokenize('[等待直到 <<$hp < 1> 或 <$score > 100>>]');
+  const [nested] = tokenize('等待直到<<hp < 1> 或 <score > 100>>');
   has(nested, '或', 'keyword.operator.logical.sbdsl');
   for (const index of [0, 2, 3]) has(nested, '>', 'punctuation.definition.boolean.end.sbdsl', index);
 });
@@ -515,7 +472,7 @@ test('comparison scopes allow visible theme contrast without recoloring arithmet
   ] });
   try {
     const themed = await registry.loadGrammar('source.sbdsl');
-    const source = "<$hp < 1> <$score > 100> <1 = 1> (1 + 2) (8 / 2) /'<'/";
+    const source = "<hp < 1> <score > 100> <1 = 1> (1 + 2) (8 / 2) '<'";
     const result = themed.tokenizeLine2(source, tm.INITIAL);
     const colors = registry.getColorMap();
     function colorAt(position) {
@@ -530,7 +487,7 @@ test('comparison scopes allow visible theme contrast without recoloring arithmet
     for (const operator of [' < ', ' > ']) {
       assert.equal(colorAt(source.indexOf(operator) + 1), '#445566');
     }
-    for (const fragment of ['<$hp', '1>', '<$score', '100>', ' = ', ' + ', ' / ', "/'<'/"]) {
+    for (const fragment of ['<hp', '1>', '<score', '100>', ' = ', ' + ', ' / ', "'<'"]) {
       const position = source.indexOf(fragment) + (fragment.endsWith('>') ? fragment.length - 1 : fragment.startsWith(' ') ? 1 : 0);
       assert.equal(colorAt(position), '#112233', fragment);
     }
@@ -546,23 +503,22 @@ test('comparison scopes allow visible theme contrast without recoloring arithmet
 
 test('infix whitespace and comments can span lines without losing closing delimiters', () => {
   const lines = tokenize([
-    '[说 (8',
-    ' / (6 / 2))]',
-    '如果 <$score',
+    '说(8',
+    ' / (6 / 2))',
+    "if <score",
     ' # threshold #',
     " >",
     ' 100',
-    '> 那么 { [说 "完成"] }',
-    '[说 (',
+    '>:',
+    '说(',
     ' -1.5e-2',
     ' / -2e+3',
-    ')]'
+    ')'
   ].join('\n'));
   has(lines[1], '/', 'keyword.operator.sbdsl');
   has(lines[4], ">", 'keyword.operator.sbdsl');
   has(lines[4], ">", 'keyword.operator.expression.comparison.sbdsl');
   has(lines[6], '>', 'punctuation.definition.boolean.end.sbdsl');
-  has(lines[6], '那么', 'keyword.control.sbdsl');
   has(lines[8], '-1.5e-2', 'constant.numeric.sbdsl');
   has(lines[9], '/', 'keyword.operator.sbdsl');
   has(lines[9], '-2e+3', 'constant.numeric.sbdsl');
@@ -581,41 +537,40 @@ test('negative numbers and exponents stay numeric while subtraction remains an o
 });
 
 test('division and menus remain distinct in independent slots and either operand', () => {
-  const [line] = tokenize("[自定义 8 /'*'/ /'#'/] [说 (/'*'/ / /'#'/)] [说 (8 / /'#'/)] [说 (8//''/)]");
-  menu(line, "/'*'/");
-  menu(line, "/'#'/");
-  menu(line, "/'*'/", 1);
-  menu(line, "/'#'/", 1);
-  menu(line, "/'#'/", 2);
+  const [line] = tokenize("自定义(8)'*''#' 说('*' / '#') 说(8 / '#') 说(8/'')");
+  menu(line, "'*'");
+  menu(line, "'#'");
+  menu(line, "'*'", 1);
+  menu(line, "'#'", 1);
+  menu(line, "'#'", 2);
   lacks(line, '#', 'comment.');
-  const [slots] = tokenize("(自定义 8 /'*'/ /'#'/) ext.<模板 <@ok> /'#'/>");
-  menu(slots, "/'*'/");
-  menu(slots, "/'#'/");
-  const [compact] = tokenize("(8//''/)");
+  const [slots] = tokenize("(自定义(8)'*''#') <ext.模板<@ok>'#'>");
+  menu(slots, "'*'");
+  menu(slots, "'#'");
+  const [compact] = tokenize("(8/'')");
   has(compact, '/', 'keyword.operator.sbdsl');
-  menu(compact, "/''/");
-  const multiline = tokenize("(\n /'#'/\n # between operands #\n /\n /'*'/\n)\n[移动 1 步]");
-  menu(multiline[1], "/'#'/");
+  menu(compact, "''");
+  const multiline = tokenize("(\n '#'\n # between operands #\n /\n '*'\n)\n移动(1)步");
+  menu(multiline[1], "'#'");
   has(multiline[2], 'between operands', 'comment.block.sbdsl');
   has(multiline[3], '/', 'keyword.operator.sbdsl');
-  menu(multiline[4], "/'*'/");
+  menu(multiline[4], "'*'");
   has(multiline[6], '移动', 'support.function.command.sbdsl');
   lacks(multiline[6], '移动', 'meta.block.reporter.');
-  for (const source of ["(8 /'*'/)", "ext.(8 /'*'/)", "(8 /'#'/)", "ext.(8 /'a/b'/)"]) {
-    const [menuSlot, following] = tokenize(source + '\n[移动 1 步]');
-    menu(menuSlot, source.slice(source.indexOf('/'), source.lastIndexOf('/') + 1));
-    lacks(menuSlot, '/', 'invalid.illegal.operator.');
+  for (const source of ["(自定义(8)'*')", "(ext.自定义(8)'*')", "(自定义(8)'#')", "(ext.自定义(8)'a/b')"]) {
+    const [menuSlot, following] = tokenize(source + '\n移动(1)步');
+    menu(menuSlot, source.slice(source.indexOf("'"), source.lastIndexOf("'") + 1));
     has(menuSlot, ')', 'punctuation.definition.reporter.end.sbdsl');
     has(following, '移动', 'support.function.command.sbdsl');
     lacks(following, '移动', 'meta.block.reporter.');
   }
 });
 
-test('compact mod does not split variable or parameter identifiers containing mod', () => {
-  const [line] = tokenize('(7mod3) ($mod3+1) ($amodb/2) ($global:model*2) (@modCount-1)');
-  has(line, 'mod', 'keyword.operator.sbdsl');
+test("mod remains part of variable and parameter identifiers", () => {
+  const [line] = tokenize('(7%3) (mod3+1) (amodb/2) (global:model*2) (@modCount-1)');
+  has(line, "%", 'keyword.operator.sbdsl');
   has(line, '3', 'constant.numeric.sbdsl');
-  for (const name of ['$mod3', '$amodb', '$global:model']) {
+  for (const name of ['mod3', 'amodb', 'global:model']) {
     has(line, name, 'variable.other.readwrite.sbdsl');
     lacks(line, name, 'keyword.operator.');
   }
@@ -630,9 +585,9 @@ test('retired starred operators are invalid while identical menu and string text
     has(line, operator, 'invalid.illegal.operator.sbdsl');
     lacks(line, operator, 'keyword.operator.');
   }
-  const [literal] = tokenize("[说 \"+* -* ** /* > =*\"] [说 /'*'/] [说 /'>'/]");
+  const [literal] = tokenize("说(\"+* -* ** /* > =*\") 说('*') 说('>')");
   has(literal, '+*', 'string.quoted.double.sbdsl');
-  menu(literal, "/'*'/");
+  menu(literal, "'*'");
   has(literal, ">", 'string.quoted.double.sbdsl');
 });
 
@@ -649,7 +604,7 @@ test('build files support bare root fields, nested arrays and all hash comments'
     'ignored: "多行注释"',
     '结束 # stage: {',
     '  backdrops: [{name: "猫\\u732b\\t\\/#", path: "./猫.svg",}]',
-    '}',
+    '',
     '"runtime": {fps: 60, fencing: false,}',
   ].join('\n'), buildGrammar);
   for (const [index, key] of [[1, 'entry'], [2, 'output'], [3, 'extensions'], [9, 'stage'], [10, 'backdrops'], [12, 'runtime']]) {
@@ -724,16 +679,16 @@ test('extension alias keywords stay out of ordinary fields, nested data and init
   }
   has(lines[5], 'as', 'keyword.control.import.sbdsl', 1);
   has(lines[5], 'alias', 'entity.name.namespace.sbdsl');
-  const init = tokenize('@init {\n  extensions: ["a.js" as "wrong"]\n}\n[移动 1 步]');
+  const init = tokenize("init:\n    extensions: [\"a.js\" as \"wrong\"]\n移动(1)步");
   lacks(init[1], 'as', 'keyword.control.import.');
   lacks(init[1], 'wrong', 'entity.name.namespace.');
-  has(init[3], '移动', 'support.function.command.sbdsl');
+  has(init[2], '移动', 'support.function.command.sbdsl');
 });
 
 test('standalone build files and init use the same data grammar', () => {
   const fields = 'x: 10\nvisible: false\ncostumes: [{name: "猫", path: "cat.svg"}]';
   const config = tokenize(fields, buildGrammar);
-  const init = tokenize('@init {\n' + fields + '\n}');
+  const init = tokenize("init:\n" + fields.split("\n").map(line => "    " + line).join("\n"));
   for (const [line, value] of [[0, 'x'], [0, '10'], [1, 'visible'], [1, 'false'], [2, 'name'], [2, '猫']]) {
     assert.equal(scopes(config[line], value).at(-1), scopes(init[line + 1], value).at(-1));
   }
@@ -754,4 +709,23 @@ test('build language activates alone and has a title-bar build action', () => {
   assert.equal(action.group, 'navigation@1');
   assert.ok(action.when.includes('resourceExtname == .buildsb'));
   assert.ok(manifest.contributes.commands.find(item => item.command === action.command).icon);
+});
+
+test('first assignments infer scalar and list names without declaration keywords', () => {
+  const rows = tokenize('score = 0\nlogs = {"a", 1}\nglobal:logs = {}\nstart:\n    logs = {}\n    score += 1');
+  has(rows[0], 'score', 'variable.other.readwrite.sbdsl');
+  for (const i of [1, 2, 4]) {
+    has(rows[i], i === 2 ? 'global:logs' : 'logs', 'variable.other.array.sbdsl');
+    has(rows[i], '{', 'punctuation.definition.list.begin.sbdsl');
+  }
+  for (const old of ['var score = 0', 'list logs = {}', 'global var score = 0']) {
+    const [row] = tokenize(old);
+    assert(row.tokens.some(t => t.scopes.includes('invalid.illegal.declaration.sbdsl')), old);
+  }
+});
+
+test('qualified headers may begin with their first typed input', () => {
+  const [row] = tokenize('ext.(x 坐标)达标:');
+  has(row, 'ext', 'entity.name.namespace.sbdsl');
+  assert(!row.tokens.some(t => t.scopes.some(s => s.startsWith('invalid.'))));
 });

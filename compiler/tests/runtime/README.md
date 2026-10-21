@@ -23,4 +23,15 @@ node compiler/tests/runtime/validate.cjs target/validation/scratch-vm examples/h
 
 该测试检查公共过程调用仍绑定全局数据和公共过程、私有同签名过程保留私有数据、递归执行三次，以及布尔参数只在为真时进入分支。预期全局 `score = 3`、私有 `score = 103`、`logs` 含三个 `tick`。
 
+列表赋值还会验证：脚本中首次 `fresh = {...}` 自动推断为列表，多次重置后仅保留 `last`；公共过程重置全局 `resetlog` 为 `global`，角色中的同名私有列表保持 `local`。
+
+扩展 C 型积木测试使用同目录下的 `fixtures/extension-controls.buildsb`，覆盖扩展循环、两个和三个分支、分支后的输入参数、显式 opcode 调用以及第三分支中的过程调用：
+
+```text
+sbdsl build compiler/tests/fixtures/extension-controls.buildsb
+node compiler/tests/runtime/validate.cjs target/validation/scratch-vm examples/hello/dist/hello.sb3 examples/extensions/dist/extensions.sb3 --controls=target/validation/outputs/extension-controls.sb3
+```
+
+除了实际执行结果，还会核对 `SUBSTACK`、`SUBSTACK2`、`SUBSTACK3` 在 VM 序列化之后保持原有连接。
+
 每个项目还会核对点击绿旗前的角色位置、方向、显示状态、旋转方式和当前造型，确认源码的静态初始化值在 VM 加载后保留。可以在过程测试输出之后再传入桌面演示 `.sb3`，检查其初始 `x = -100` 和“蓝色笑脸”造型，以及运行结束时的 `x = 100`、全局 `score = 20` 和成功提示。

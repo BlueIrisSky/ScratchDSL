@@ -8,7 +8,7 @@ use crate::{
     analysis::{OverlaySource, SourceProvider},
     config,
     model::{Slot, Template},
-    parser::{parse_name, parse_string},
+    parser::{is_data_name, keyword_rest, parse_string},
     registry::procedure_template,
 };
 use std::{
@@ -28,6 +28,7 @@ pub struct VisibleSymbols {
     pub lists: Vec<DataSymbol>,
     pub procedures: Vec<Template>,
     pub parameters: Vec<Slot>,
+    pub(super) scopes: Option<Vec<LayoutScope>>,
 }
 
 /// Return declarations visible at a UTF-8 byte offset in the current document.
@@ -39,22 +40,17 @@ pub fn collect(
     overlays: &BTreeMap<PathBuf, String>,
     cursor: usize,
 ) -> VisibleSymbols {
+    let cursor = cursor.min(source.len());
     let Some(path) = path else {
-        let file = scan(Path::new("<untitled>"), source);
-        let scope = file.scope_at(cursor.min(source.len()));
+        let (declarations, scope, scopes) = scan_at(Path::new("<untitled>"), source, cursor);
         let mut index = Index::default();
-        index.declarations(file.declarations);
-        return index.visible(scope);
+        index.declarations(declarations);
+        return index.visible(scope, Some(scopes));
     };
     let path = crate::analysis::normalize_path(path);
-    let mut buffers: BTreeMap<_, _> = overlays
-        .iter()
-        .map(|(path, source)| (crate::analysis::normalize_path(path), source.clone()))
-        .collect();
-    buffers.insert(path.clone(), source.to_owned());
-    let provider = OverlaySource::new(&buffers);
-    let current = scan(&path, source);
-    let scope = current.scope_at(cursor.min(source.len()));
+    let mut provider = OverlaySource::new(overlays);
+    provider.insert(path.clone(), source.to_owned());
+    let (declarations, scope, scopes) = scan_at(&path, source, cursor);
 
     if let Ok(config) = config::discover_for_document(&path, &provider) {
         let mut loader = Loader {
@@ -65,13 +61,13 @@ pub fn collect(
         };
         loader.file(&config.entry);
         if loader.visited.contains(&path) {
-            return loader.index.visible(scope);
+            return loader.index.visible(scope, Some(scopes));
         }
     }
 
     let mut index = Index::default();
-    index.declarations(current.declarations);
-    index.visible(scope)
+    index.declarations(declarations);
+    index.visible(scope, Some(scopes))
 }
 
 #[derive(Default)]
@@ -85,22 +81,50 @@ struct ScopeSymbols {
 struct Index {
     global: ScopeSymbols,
     sprites: BTreeMap<String, ScopeSymbols>,
+    inferred: Vec<(Option<String>, String, bool, bool)>,
 }
 
 impl Index {
     fn declaration(&mut self, declaration: Declaration) {
         let (scope, name, list, procedure) = match declaration {
             Declaration::Import(_) => return,
+            Declaration::Inferred {
+                scope,
+                name,
+                list,
+                global,
+            } => {
+                self.inferred.push((scope, name, list, global));
+                return;
+            }
             Declaration::Data { scope, name, list } => (scope, Some(name), list, None),
             Declaration::Procedure { scope, template } => (scope, None, false, Some(template)),
         };
+        if let Some(name) = &name {
+            let opposite = |symbols: &ScopeSymbols| {
+                if list {
+                    symbols.variables.contains(name)
+                } else {
+                    symbols.lists.contains(name)
+                }
+            };
+            let conflict = match &scope {
+                Some(sprite) => {
+                    opposite(&self.global) || self.sprites.get(sprite).is_some_and(opposite)
+                }
+                None => opposite(&self.global) || self.sprites.values().any(opposite),
+            };
+            if conflict {
+                return;
+            }
+        }
         let symbols = match scope {
             Some(sprite) => self.sprites.entry(sprite).or_default(),
             None => &mut self.global,
         };
         if let Some(name) = name {
-            // Repeated declarations replace their values in the compiler. The
-            // completion list only needs one entry for that name and data kind.
+            // Repeated assignments retain the first data kind. Invalid changes
+            // are diagnosed by the binder and must not alter completion kinds.
             if list {
                 symbols.lists.insert(name);
             } else {
@@ -123,7 +147,21 @@ impl Index {
         }
     }
 
-    fn visible(self, scope: Scope) -> VisibleSymbols {
+    fn visible(mut self, scope: Scope, scopes: Option<Vec<LayoutScope>>) -> VisibleSymbols {
+        for (sprite, name, list, global) in std::mem::take(&mut self.inferred) {
+            let private = !global
+                && sprite
+                    .as_ref()
+                    .and_then(|sprite| self.sprites.get(sprite))
+                    .is_some_and(|symbols| {
+                        symbols.variables.contains(&name) || symbols.lists.contains(&name)
+                    });
+            self.declaration(Declaration::Data {
+                scope: if private { sprite } else { None },
+                name,
+                list,
+            });
+        }
         let mut result = VisibleSymbols {
             variables: self
                 .global
@@ -138,6 +176,7 @@ impl Index {
                 .map(|name| DataSymbol { name, global: true })
                 .collect(),
             parameters: scope.parameters,
+            scopes,
             ..VisibleSymbols::default()
         };
         let mut procedures = self.global.procedures;
@@ -177,15 +216,12 @@ impl Loader<'_> {
         let Ok(source) = self.provider.read_to_string(&path) else {
             return;
         };
-        for declaration in scan(&path, &source).declarations {
+        for declaration in scan_declarations(&path, &source) {
             if let Declaration::Import(module) = declaration {
-                let relative = format!("{}.sbdsl", module.replace('.', "/"));
-                let nearby = path.parent().unwrap_or(Path::new(".")).join(&relative);
-                let fallback = self.src_dir.join(&relative);
-                if self.provider.is_file(&nearby) {
-                    self.file(&nearby);
-                } else if self.provider.is_file(&fallback) {
-                    self.file(&fallback);
+                if let Ok(target) =
+                    crate::project::resolve_module_path(&path, self.src_dir, &module, self.provider)
+                {
+                    self.file(&target);
                 }
             } else {
                 self.index.declaration(declaration);
@@ -201,6 +237,12 @@ enum Declaration {
         name: String,
         list: bool,
     },
+    Inferred {
+        scope: Option<String>,
+        name: String,
+        list: bool,
+        global: bool,
+    },
     Procedure {
         scope: Option<String>,
         template: Template,
@@ -213,62 +255,18 @@ struct Scope {
     parameters: Vec<Slot>,
 }
 
-struct Region {
-    start: usize,
-    end: usize,
-    scope: Scope,
-}
-
-#[derive(Default)]
-struct FileIndex {
-    declarations: Vec<Declaration>,
-    regions: Vec<Region>,
-}
-
-impl FileIndex {
-    fn scope_at(&self, cursor: usize) -> Scope {
-        self.regions
-            .iter()
-            .filter(|region| region.start <= cursor && cursor <= region.end)
-            .max_by_key(|region| region.start)
-            .map(|region| region.scope.clone())
-            .unwrap_or_default()
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Body {
     Stage,
     Sprite,
     Script,
+    Init,
 }
 
 struct Frame {
     body: Body,
-    start: usize,
+    indent: usize,
     scope: Scope,
-}
-
-fn keyword<'a>(source: &'a str, keyword: &str) -> Option<&'a str> {
-    source
-        .strip_prefix(keyword)
-        .filter(|rest| rest.chars().next().is_none_or(syntax_space))
-        .map(str::trim)
-}
-
-fn syntax_space(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\r' | '\n')
-}
-
-fn leading_name(source: &str) -> Option<(String, usize)> {
-    let end = if source.starts_with('"') {
-        quoted_end(source, 0)
-    } else {
-        source
-            .find(|c: char| syntax_space(c) || c == '=')
-            .unwrap_or(source.len())
-    };
-    Some((parse_name(&source[..end]).ok()?, end))
 }
 
 fn declaration_header(
@@ -278,51 +276,53 @@ fn declaration_header(
     end: usize,
     has_body: bool,
     frames: &[Frame],
-    output: &mut FileIndex,
+    declarations: &mut Vec<Declaration>,
 ) -> Option<(Body, Scope)> {
     let header = source[start..end].trim();
     let scope = frames
         .last()
         .map(|frame| frame.scope.clone())
         .unwrap_or_default();
-    let allowed = frames.last().is_none_or(|frame| frame.body != Body::Script);
+    let allowed = frames
+        .last()
+        .is_none_or(|frame| !matches!(frame.body, Body::Script | Body::Init));
+    if !has_body
+        && let Some(assignment) = crate::parser::assignment_parts(header)
+        && let Ok((name, global)) = crate::parser::parse_reference(assignment.target)
+    {
+        let list = assignment.value.starts_with('{');
+        if allowed && assignment.operator == "=" {
+            declarations.push(Declaration::Data {
+                scope: if global { None } else { scope.sprite.clone() },
+                name,
+                list,
+            });
+        } else if frames
+            .last()
+            .is_some_and(|frame| frame.body == Body::Script)
+        {
+            declarations.push(Declaration::Inferred {
+                scope: scope.sprite.clone(),
+                name,
+                list,
+                global,
+            });
+        }
+    }
     if allowed {
         if !has_body {
-            if let Some(module) = keyword(header, "import") {
-                if scope.sprite.is_none()
-                    && !module.ends_with(".sbdsl")
-                    && module
-                        .split('.')
-                        .all(|name| !name.starts_with('"') && parse_name(name).is_ok())
-                {
-                    output.declarations.push(Declaration::Import(module.into()));
-                }
-            } else {
-                let (global, declaration) = if let Some(rest) = keyword(header, "@global") {
-                    (true, rest)
-                } else {
-                    (false, header)
-                };
-                let data = keyword(declaration, "@var")
-                    .map(|rest| (false, rest))
-                    .or_else(|| keyword(declaration, "@list").map(|rest| (true, rest)));
-                if let Some((list, rest)) = data
-                    && (!global || scope.sprite.is_some())
-                    && let Some((name, end)) = leading_name(rest)
-                    && (rest[end..].trim().is_empty() || rest[end..].trim().starts_with('='))
-                {
-                    output.declarations.push(Declaration::Data {
-                        scope: if global { None } else { scope.sprite.clone() },
-                        name,
-                        list,
-                    });
-                }
+            if let Some(module) = keyword_rest(header, "import")
+                && scope.sprite.is_none()
+                && !module.ends_with(".sbdsl")
+                && module.split('.').all(is_data_name)
+            {
+                declarations.push(Declaration::Import(module.into()));
             }
         } else {
-            if keyword(header, "@stage") == Some("") && frames.is_empty() {
+            if keyword_rest(header, "stage") == Some("") && frames.is_empty() {
                 return Some((Body::Stage, Scope::default()));
             }
-            if let Some(rest) = keyword(header, "@sprite")
+            if let Some(rest) = keyword_rest(header, "sprite")
                 && scope.sprite.is_none()
                 && rest.starts_with('"')
             {
@@ -339,12 +339,15 @@ fn declaration_header(
                     ));
                 }
             }
-            if let Some(header) = keyword(header, "定义自制积木") {
+            if keyword_rest(header, "init") == Some("") {
+                return Some((Body::Init, scope));
+            }
+            if let Some(header) = keyword_rest(header, "def") {
                 let mut scope = scope;
                 let id = format!("{}:{start}", path.display());
                 if let Ok(template) = procedure_template(header, &id) {
                     scope.parameters = template.slots().cloned().collect();
-                    output.declarations.push(Declaration::Procedure {
+                    declarations.push(Declaration::Procedure {
                         scope: scope.sprite.clone(),
                         template,
                     });
@@ -356,82 +359,138 @@ fn declaration_header(
     has_body.then_some((Body::Script, scope))
 }
 
-fn scan(path: &Path, original: &str) -> FileIndex {
-    let source = without_comments(original);
-    let mut result = FileIndex::default();
+fn scan_declarations(path: &Path, original: &str) -> Vec<Declaration> {
+    let cleaned = without_comments(original);
+    let continuations = continuation_lines(&cleaned);
+    scan_indented(path, &cleaned, &continuations, None).0
+}
+
+fn scan_at(
+    path: &Path,
+    original: &str,
+    cursor: usize,
+) -> (Vec<Declaration>, Scope, Vec<LayoutScope>) {
+    let cleaned = without_comments(original);
+    let continuations = continuation_lines(&cleaned);
+    let scopes = layout_scopes_from(&cleaned, &continuations, cursor);
+    let active_start = scopes.last().map(|scope| scope.start);
+    let (declarations, scope) = scan_indented(path, &cleaned, &continuations, active_start);
+    (declarations, scope, scopes)
+}
+
+/// Physical indentation is enough to recover declaration scopes even while a
+/// command or expression is unfinished. Literal braces never create scopes.
+fn scan_indented(
+    path: &Path,
+    source: &str,
+    continuations: &BTreeSet<usize>,
+    active_start: Option<usize>,
+) -> (Vec<Declaration>, Scope) {
+    let mut declarations = Vec::new();
+    let mut active_scope = Scope::default();
     let mut frames = Vec::<Frame>::new();
-    let mut groups = Vec::<(char, usize)>::new();
-    let mut start = 0;
+    let mut offset: usize = 0;
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !continuations.contains(&offset) {
+            let indent = indentation_width(line);
+            while frames.last().is_some_and(|frame| indent <= frame.indent) {
+                frames.pop();
+            }
+            if frames.last().is_none_or(|frame| frame.body != Body::Init) {
+                let end = offset + line.trim_end().len();
+                let body = is_layout_header(trimmed);
+                if let Some((body, scope)) = declaration_header(
+                    path,
+                    source,
+                    offset,
+                    end - usize::from(body),
+                    body,
+                    &frames,
+                    &mut declarations,
+                ) {
+                    if active_start == Some(end) {
+                        active_scope = scope.clone();
+                    }
+                    frames.push(Frame {
+                        body,
+                        indent,
+                        scope,
+                    });
+                }
+            }
+        }
+        offset += line.len();
+    }
+    (declarations, active_scope)
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct LayoutScope {
+    pub header: String,
+    pub start: usize,
+    indent: usize,
+}
+
+fn indentation_width(line: &str) -> usize {
+    line.chars()
+        .take_while(|c| matches!(c, ' ' | '\t'))
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum()
+}
+
+fn is_layout_header(line: &str) -> bool {
+    line.ends_with(':') && !line.starts_with(['\'', '[', '(', '<', '{', '#'])
+}
+
+/// Line starts inside an unfinished atom are continuations, even if the user
+/// has not indented them yet. A fresh declaration recovers from a broken atom.
+fn continuation_lines(source: &str) -> BTreeSet<usize> {
+    let mut result = BTreeSet::new();
+    let mut groups = Vec::new();
     let mut position = 0;
     while position < source.len() {
         let c = source[position..].chars().next().unwrap();
+        if matches!(c, '<' | '>')
+            && let Some(end) = operator_end(source, position, &groups)
+        {
+            position = end;
+            continue;
+        }
         match c {
-            '"' => position = quoted_end(&source, position),
-            '/' if source[position..].starts_with("/'")
-                || operator_end(&source, position, &groups).is_none() =>
-            {
-                position = menu_end(&source, position).0
-            }
-            '\n' | '\r' => {
-                if groups.is_empty() || recovery_line(&source[position + 1..]) {
-                    declaration_header(path, &source, start, position, false, &frames, &mut result);
-                    groups.clear();
-                    start = position + 1;
-                }
+            '"' => position = quoted_end(source, position),
+            '\'' => position = menu_end(source, position).0,
+            '\n' => {
                 position += 1;
-            }
-            '{' => {
-                if source[start..position].trim() == "@init" {
-                    position = json_end(&source, position);
-                } else {
-                    if let Some((body, scope)) = declaration_header(
-                        path,
-                        &source,
-                        start,
-                        position,
-                        true,
-                        &frames,
-                        &mut result,
-                    ) {
-                        frames.push(Frame {
-                            body,
-                            start: position + 1,
-                            scope,
-                        });
-                    }
-                    position += 1;
-                }
-                groups.clear();
-                start = position;
-            }
-            '}' => {
-                declaration_header(path, &source, start, position, false, &frames, &mut result);
-                if let Some(frame) = frames.pop() {
-                    result.regions.push(Region {
-                        start: frame.start,
-                        end: position,
-                        scope: frame.scope,
+                let next = source[position..].split('\n').next().unwrap_or("").trim();
+                let recovery = crate::parser::assignment_parts(next).is_some()
+                    || [
+                        "var", "list", "global", "stage", "sprite", "init", "def", "import",
+                        "start", "if", "elif", "else", "loop", "while",
+                    ]
+                    .iter()
+                    .any(|word| {
+                        keyword_rest(next.trim_end_matches(':').trim_end(), word).is_some()
                     });
+                if recovery {
+                    groups.clear();
+                } else if !groups.is_empty() {
+                    result.insert(position);
                 }
-                groups.clear();
-                position += 1;
-                start = position;
             }
-            '<' | '>' if operator_end(&source, position, &groups).is_some() => {
-                position = operator_end(&source, position, &groups).unwrap();
-            }
-            '(' | '[' | '<' => {
+            '(' | '[' | '<' | '{' => {
                 groups.push((
                     match c {
                         '(' => ')',
                         '[' => ']',
+                        '{' => '}',
                         _ => '>',
                     },
                     position,
                 ));
                 position += 1;
             }
-            ')' | ']' | '>' => {
+            ')' | ']' | '>' | '}' => {
                 if groups.last().is_some_and(|(close, _)| *close == c) {
                     groups.pop();
                 }
@@ -440,36 +499,67 @@ fn scan(path: &Path, original: &str) -> FileIndex {
             _ => position += c.len_utf8(),
         }
     }
-    declaration_header(path, &source, start, position, false, &frames, &mut result);
-    for frame in frames {
-        result.regions.push(Region {
-            start: frame.start,
-            end: source.len(),
-            scope: frame.scope,
-        });
-    }
     result
 }
 
-fn recovery_line(source: &str) -> bool {
-    let line = source.trim_start_matches(syntax_space);
-    line.starts_with('}')
-        || [
-            "@var",
-            "@list",
-            "@global",
-            "@sprite",
-            "@stage",
-            "@init",
-            "import",
-            "定义自制积木",
-        ]
-        .iter()
-        .any(|word| keyword(line, word).is_some())
+/// Describe the current indentation scope without requiring valid statements.
+/// The cursor's indentation also closes a preceding incomplete script.
+pub(super) fn layout_scopes(source: &str, cursor: usize) -> Vec<LayoutScope> {
+    let source = without_comments(source);
+    let continuations = continuation_lines(&source);
+    layout_scopes_from(&source, &continuations, cursor)
+}
+
+fn layout_scopes_from(
+    source: &str,
+    continuations: &BTreeSet<usize>,
+    cursor: usize,
+) -> Vec<LayoutScope> {
+    let mut scopes = Vec::<LayoutScope>::new();
+    let mut offset: usize = 0;
+    for line in source.split_inclusive('\n') {
+        let current = cursor < offset + line.len()
+            || (cursor == source.len()
+                && offset + line.len() == source.len()
+                && !line.ends_with('\n'));
+        let visible = if current {
+            &line[..cursor.saturating_sub(offset).min(line.len())]
+        } else {
+            line
+        };
+        if !visible.trim().is_empty() || current {
+            let indent = indentation_width(visible);
+            if !continuations.contains(&offset) {
+                while scopes.last().is_some_and(|scope| indent <= scope.indent) {
+                    scopes.pop();
+                }
+            }
+            if current {
+                break;
+            }
+            if !continuations.contains(&offset)
+                && scopes
+                    .last()
+                    .is_none_or(|scope| keyword_rest(&scope.header, "init") != Some(""))
+                && is_layout_header(line.trim())
+            {
+                scopes.push(LayoutScope {
+                    header: line.trim().trim_end_matches(':').trim_end().into(),
+                    start: offset + line.trim_end().len(),
+                    indent,
+                });
+            }
+        }
+        offset += line.len();
+    }
+    if cursor == source.len() && source.ends_with('\n') && !continuations.contains(&cursor) {
+        scopes.clear();
+    }
+    scopes
 }
 
 /// Unlike the strict parser, an unfinished string/menu consumes only its line.
-fn quoted_end(source: &str, start: usize) -> usize {
+pub(super) fn quoted_end(source: &str, start: usize) -> usize {
     let mut escaped = false;
     for (offset, c) in source[start + 1..].char_indices() {
         let position = start + 1 + offset;
@@ -491,50 +581,19 @@ pub(super) fn menu_end(source: &str, start: usize) -> (usize, bool) {
     let line_end = source[start..]
         .find(['\n', '\r'])
         .map_or(source.len(), |offset| start + offset);
-    if !source[start..].starts_with("/'") {
-        return (line_end, false);
-    }
+    let content = start + 1;
     let mut escaped = false;
-    for (offset, c) in source[start + 2..line_end].char_indices() {
+    for (offset, c) in source[content..line_end].char_indices() {
         if escaped {
             escaped = false;
         } else if c == '\\' {
             escaped = true;
         } else if c == '\'' {
-            let end = start + 2 + offset + 1;
-            return if source[end..].starts_with('/') {
-                (end + 1, true)
-            } else {
-                (line_end, false)
-            };
+            let end = content + offset + 1;
+            return (end, true);
         }
     }
     (line_end, false)
-}
-
-fn comment_end(source: &str, start: usize) -> usize {
-    let line_end = source[start..]
-        .find(['\n', '\r'])
-        .map_or(source.len(), |offset| start + offset);
-    if let Some(offset) = source[start + 1..line_end].find('#') {
-        return start + 1 + offset + 1;
-    }
-    let line_start = source[..start]
-        .rfind(['\n', '\r'])
-        .map_or(0, |offset| offset + 1);
-    let alone = source[line_start..start]
-        .chars()
-        .all(|c| matches!(c, ' ' | '\t'))
-        && source[start + 1..line_end]
-            .chars()
-            .all(|c| matches!(c, ' ' | '\t'));
-    if alone {
-        source[line_end..]
-            .find('#')
-            .map_or(source.len(), |offset| line_end + offset + 1)
-    } else {
-        line_end
-    }
 }
 
 pub(super) fn operator_end(
@@ -543,14 +602,15 @@ pub(super) fn operator_end(
     groups: &[(char, usize)],
 ) -> Option<usize> {
     let &(close, open) = groups.last()?;
-    if !matches!(close, ')' | '>') || explicit_group(source, open) {
+    if !matches!(close, ')' | '>') || explicit_group(source, open) || source[..open].ends_with('.')
+    {
         return None;
     }
     let end = crate::parser::infix_operator_at(source, open, position, true)?;
     if source[position..].starts_with('>') {
         // A plain > can close this group or compare its left value. Preserve
         // the closing boundary needed by each enclosing complete group, so
-        // <@ready> in ext.<template <@ready> 1> cannot consume the next slot.
+        // <@ready> in <ext.template <@ready>(1)> cannot consume the next slot.
         let mut outer_end = source.len().saturating_add(1);
         let mut has_parent_boundary = false;
         for &(_, group_open) in groups {
@@ -569,12 +629,7 @@ pub(super) fn operator_end(
 }
 
 fn explicit_group(source: &str, open: usize) -> bool {
-    let Some(prefix) = source[..open]
-        .strip_suffix('.')
-        .or_else(|| source[..open].strip_suffix(".hat"))
-    else {
-        return false;
-    };
+    let prefix = &source[..open];
     prefix.ends_with('"')
         && prefix.char_indices().rev().any(|(start, c)| {
             c == '"' && prefix[..start].ends_with("::") && parse_string(&prefix[start..]).is_ok()
@@ -583,19 +638,14 @@ fn explicit_group(source: &str, open: usize) -> bool {
 
 fn without_comments(source: &str) -> String {
     let mut bytes = source.as_bytes().to_vec();
-    let mut groups = Vec::new();
     let mut position = 0;
     while position < source.len() {
         let c = source[position..].chars().next().unwrap();
         match c {
             '"' => position = quoted_end(source, position),
-            '/' if source[position..].starts_with("/'")
-                || operator_end(source, position, &groups).is_none() =>
-            {
-                position = menu_end(source, position).0
-            }
+            '\'' => position = menu_end(source, position).0,
             '#' => {
-                let end = comment_end(source, position);
+                let end = crate::notation::comment_end(source, position).unwrap_or(source.len());
                 for byte in &mut bytes[position..end] {
                     if !matches!(*byte, b'\n' | b'\r') {
                         *byte = b' ';
@@ -603,53 +653,10 @@ fn without_comments(source: &str) -> String {
                 }
                 position = end;
             }
-            '<' | '>' if operator_end(source, position, &groups).is_some() => {
-                position = operator_end(source, position, &groups).unwrap()
-            }
-            '(' | '[' | '<' => {
-                groups.push((
-                    match c {
-                        '(' => ')',
-                        '[' => ']',
-                        _ => '>',
-                    },
-                    position,
-                ));
-                position += 1;
-            }
-            ')' | ']' | '>' => {
-                if groups.last().is_some_and(|(close, _)| *close == c) {
-                    groups.pop();
-                }
-                position += 1;
-            }
             _ => position += c.len_utf8(),
         }
     }
     String::from_utf8(bytes).expect("whole comments replaced by ASCII spaces")
-}
-
-fn json_end(source: &str, start: usize) -> usize {
-    let mut depth = 1;
-    let mut position = start + 1;
-    while position < source.len() {
-        match source[position..].chars().next().unwrap() {
-            '"' => position = quoted_end(source, position),
-            '{' => {
-                depth += 1;
-                position += 1;
-            }
-            '}' => {
-                position += 1;
-                depth -= 1;
-                if depth == 0 {
-                    return position;
-                }
-            }
-            c => position += c.len_utf8(),
-        }
-    }
-    source.len()
 }
 
 #[cfg(test)]
@@ -671,26 +678,98 @@ mod tests {
     }
 
     #[test]
-    fn unfinished_blocks_preserve_data_scope_and_add_declarations() {
+    fn indentation_tracks_private_data_parameters_and_incomplete_commands() {
         let source = r#"
-@var score = 1
-@var score = 2
-@list score = []
-@sprite "玩家" {
-    @init {}
-    @var score = 3
-    @var "" = 4
-    @list bag = []
-    @global @var level = 1
-}
-@sprite "其他" {
-    @init {}
-    @var hidden = 4
-}
-@sprite "玩家" add {
-    @var health = 100
-    当绿旗被点击 {
-        [说 $sc|
+shared = 1
+history = {"start", 1}
+sprite "玩家":
+    init:
+        x: 0
+        costumes: [{name: "var fake", path: "a.svg"}]
+    score = 2
+    bag = {}
+    global:level = 1
+    def 前进 @steps <@ready>:
+        if <@ready>:
+            说 'text # with }'
+            移动 (@steps + 1) 步
+            [说 |
+sprite "其他":
+    init:
+        pass
+    hidden = 1
+"#;
+        let symbols = here(source);
+        assert_eq!(
+            names(&symbols.variables),
+            BTreeSet::from([
+                ("shared".into(), true),
+                ("level".into(), true),
+                ("score".into(), false),
+            ])
+        );
+        assert_eq!(
+            names(&symbols.lists),
+            BTreeSet::from([("history".into(), true), ("bag".into(), false)])
+        );
+        assert_eq!(
+            symbols
+                .parameters
+                .iter()
+                .map(|slot| slot.name.as_str())
+                .collect::<Vec<_>>(),
+            ["steps", "ready"]
+        );
+        assert_eq!(symbols.procedures.len(), 1);
+    }
+
+    #[test]
+    fn dedented_cursor_does_not_keep_a_previous_procedures_parameters() {
+        let source =
+            "sprite \"玩家\":\n    local = 1\n    def 测试 @value:\n        说 (@value)\n    |";
+        let symbols = here(source);
+        assert!(symbols.parameters.is_empty());
+        assert_eq!(
+            names(&symbols.variables),
+            BTreeSet::from([("local".into(), false)])
+        );
+        let symbols = here(&source.replace("    |", "|"));
+        assert!(symbols.variables.is_empty());
+        assert!(symbols.parameters.is_empty());
+    }
+
+    #[test]
+    fn unindented_expression_continuations_preserve_sprite_and_parameter_scope() {
+        for expression in ["<score\n>\n|>", "((score)+\n(@n)/\n|)"] {
+            let source = format!(
+                "shared = 1\nsprite \"玩家\":\n    score = 2\n    def 示例 @n:\n        [说 {expression}]\n"
+            );
+            let symbols = here(&source);
+            assert!(names(&symbols.variables).contains(&("score".into(), false)));
+            assert_eq!(symbols.parameters[0].name, "n");
+        }
+    }
+
+    #[test]
+    fn unfinished_blocks_preserve_data_scope_and_add_declarations() {
+        let source = r#"score = 1
+score = 2
+score = {}
+sprite "玩家" :
+    init :
+        pass
+    score = 3
+    placeholder = 4
+    bag = {}
+    global:level = 1
+sprite "其他" :
+    init :
+        pass
+    hidden = 4
+sprite "玩家" add :
+    health = 100
+    start :
+        [说 sc|
 "#;
         let symbols = here(source);
         assert_eq!(
@@ -698,37 +777,32 @@ mod tests {
             BTreeSet::from([
                 ("score".into(), true),
                 ("score".into(), false),
-                ("".into(), false),
+                ("placeholder".into(), false),
                 ("level".into(), true),
                 ("health".into(), false),
             ])
         );
         assert_eq!(
             names(&symbols.lists),
-            BTreeSet::from([("score".into(), true), ("bag".into(), false),])
+            BTreeSet::from([("bag".into(), false)])
         );
     }
 
     #[test]
     fn procedure_scope_parameters_and_signature_shadowing_are_lexical() {
-        let source = r#"
-@var shared
-定义自制积木 回答 @public <@ok> {
-    [说 @public]
-}
-定义自制积木 公共调用 @publicArg {
-    [说 $|]
-}
-@sprite "玩家" {
-    @init {}
-    @var secret
-    定义自制积木 回答 @private <@yes> {
-        [说 @private]
-    }
-    定义自制积木 本地调用 @"文本 名" <@"条件 名"> @warp {
-        [说 @"文本 名"]
-    }
-}
+        let source = r#"shared = 0
+def 回答 @public <@ok> :
+    说 (@public)
+def 公共调用 @publicArg :
+    说 |
+sprite "玩家" :
+    init :
+        pass
+    secret = 0
+    def 回答 @private <@yes> :
+        说 (@private)
+    def 本地调用 @"文本 名" <@"条件 名"> @warp :
+        说 (@"文本 名")
 "#;
         let public = here(source);
         assert_eq!(
@@ -753,8 +827,8 @@ mod tests {
         );
 
         let source = source
-            .replace("$|", "$")
-            .replace("[说 @\"文本 名\"]", "[说 @|]");
+            .replace("|", "")
+            .replace("说 (@\"文本 名\")", "[说 @|]");
         let private = here(&source);
         assert_eq!(private.procedures.len(), 3);
         assert!(
@@ -784,39 +858,33 @@ mod tests {
 
     #[test]
     fn comments_strings_menus_json_and_script_declarations_do_not_leak() {
-        let source = r##"
-# @var line_comment
-# @var inline_comment # @var real_inline = 1
+        let source = r##"# var line_comment
+# var inline_comment # real_inline = 1
 #
-@var block_comment
-@sprite "fake" {
-    @var inside_comment
-}
+block_comment = 0
+sprite "fake" :
+    inside_comment = 0
 #
-@var color = "#123456"
-@sprite "玩家" {
-    @init {
+color = "#123456"
+sprite "玩家" :
+    init :
         "sounds": [{"name": "@var json_name", "path": "a/#file.wav"}],
         "invalid": {
-            @var json_statement
+        json_statement = 0
         }
-    }
-    @var local
-    当绿旗被点击 {
-        [说 "@var string"]
-        [说 /'@var menu'/]
-        [说 /'* # @var star_menu #'/]
-        [说 /'a\'/# @var escaped_quote'/]
-        [说 /'a\\/# @var escaped_backslash'/]
-        @var illegal_script_declaration
-        定义自制积木 假的 @argument {
-            @var illegal_nested
-        }
-        [说 (1 / # division # 2)]
-        [说 $|]
-    }
-}
-@var after = 1
+    local = 0
+    start :
+        说 ("@var string")
+        说 '@var menu'
+        说 '* # @var star_menu #'
+        说 'a\'/# @var escaped_quote'
+        说 'a\\/# @var escaped_backslash'
+        var illegal_script_declaration
+        def 假的 @argument :
+            var illegal_nested
+        说 (1 / 2)
+        说 |
+after = 1
 "##;
         let symbols = here(source);
         assert_eq!(
@@ -833,40 +901,83 @@ mod tests {
     }
 
     #[test]
-    fn new_infix_operators_preserve_private_procedure_scope() {
-        for expression in [
-            "<$local > @steps>",
-            "<$local>@steps>",
-            "<$local\n>\n@steps>",
-            "<($local / @steps) > 0>",
-            "<($local/@steps)>0>",
-            "<($local\n/\n@steps)>0>",
-            "<($local mod @steps)=0>",
-            "<($local+1)<(@steps-1)>",
-            "<<@ready>><false>>",
-            "ext.<模板 <@ready> 1>",
-            "ext.<模板 <@ready>\n1>",
-            "ext.<模板 <$local>@steps> 1>",
-            "ext.<模板 ext.<模板 <@ready> 1> 2>",
+    fn extension_control_branches_preserve_private_parameters_and_data_scope() {
+        for header in [
+            "ext.选择 <@ready> (3)",
+            "\"扩展 名😀\".选择 <@ready> (3)",
+            "ext::\"choose\"(<@ready>, (3))",
         ] {
             let source = format!(
-                r#"
-@var shared = 1
-@sprite "玩家😀" {{
-    @init {{}}
-    @var local = 2
-    @list bag = []
-    定义自制积木 测试 @steps <@ready> {{
-        如果 {expression} 那么 {{
-            [说 $|]
-        }}
-    }}
-}}
-@sprite "其他" {{
-    @init {{}}
-    @var hidden = 3
-}}
-@var after = 4
+                r#"shared = 1
+sprite "玩家😀":
+    init:
+        pass
+    local = 2
+    logs = {{}}
+    def 检查 @steps <@ready>:
+        {header}:
+            pass
+        else:
+            pass
+        else:
+            说 |
+sprite "其他":
+    init:
+        pass
+    hidden = 3
+"#
+            );
+            let symbols = here(&source);
+            assert_eq!(
+                names(&symbols.variables),
+                BTreeSet::from([("shared".into(), true), ("local".into(), false)]),
+                "{header}"
+            );
+            assert_eq!(
+                names(&symbols.lists),
+                BTreeSet::from([("logs".into(), false)]),
+                "{header}"
+            );
+            assert_eq!(
+                symbols
+                    .parameters
+                    .iter()
+                    .map(|slot| slot.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["steps", "ready"],
+                "{header}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_infix_operators_preserve_private_procedure_scope() {
+        for expression in [
+            "<local > @steps>",
+            "<local / @steps > 0>",
+            "<local % @steps = 0>",
+            "<local + 1 < @steps - 1>",
+            "<<@ready> > <false>>",
+            "<ext.模板 <@ready> (1)>",
+            "<ext.模板 <@ready>\n(1)>",
+            "<ext.模板 <local > @steps> (1)>",
+            "<ext.模板 <ext.模板 <@ready> (1)> (2)>",
+        ] {
+            let source = format!(
+                r#"shared = 1
+sprite "玩家😀" :
+    init :
+        pass
+    local = 2
+    bag = {{}}
+    def 测试 @steps <@ready> :
+        if {expression}:
+            说 |
+sprite "其他" :
+    init :
+        pass
+    hidden = 3
+after = 4
 "#,
             );
             let symbols = here(&source);
@@ -897,24 +1008,19 @@ mod tests {
 
     #[test]
     fn division_comments_and_menu_literals_do_not_corrupt_following_declarations() {
-        let source = r##"
-@sprite "玩家" {
-    @init {}
-    @var local = 1
-    当绿旗被点击 {
-        [说 ($local / # @var not_a_declaration # 2)]
-        [说 ($local
-            /
-            # @var also_not_a_declaration
-            2)]
-        [说 <($local/2)>1>]
-        [说 /'*'/]
-        [说 /'/# @var menu'/]
-    }
-    @var after = 2
-    当绿旗被点击 { [说 $|] }
-}
-@var outside = 3
+        let source = r##"sprite "玩家" :
+    init :
+        pass
+    local = 1
+    start :
+        说 (local / 2)
+        说 (<local / 2 > 1>)
+        说 '*'
+        说 '/# @var menu'
+    after = 2
+    start :
+        说 |
+outside = 3
 "##;
         let symbols = here(source);
         assert_eq!(
@@ -930,13 +1036,13 @@ mod tests {
     #[test]
     fn unfinished_menus_hide_fake_symbols_and_recover_on_the_next_line() {
         for menu in [
-            "/'@var fake",
-            "/'escaped\\' / # @var fake",
-            "/'escaped\\\\ / # @var fake",
-            "/'closed quote' # @var fake",
-            "/'still contains / @var fake",
+            "'var fake",
+            "'escaped\\' / # @var fake",
+            "'escaped\\\\ / # @var fake",
+            "'closed quote' # var fake",
+            "'still contains / var fake",
         ] {
-            let source = format!("@var before = 1\n[说 {menu}\n@var after = 2\n[说 $|]");
+            let source = format!("before = 1\n说 {menu}\nafter = 2\n说 |");
             let symbols = here(&source);
             assert_eq!(
                 names(&symbols.variables),
@@ -948,20 +1054,18 @@ mod tests {
 
     #[test]
     fn recovers_after_bad_statements_and_handles_multiline_arrays() {
-        let source = r#"
-@var before
+        let source = r#"before = 0
 [unclosed command
-@var after
-@list multi = [
+after = 0
+multi = {
     1,
     "@var not_data",
     2
-]
-@var "a b" = "unterminated
-@var 文本
-@stage {
-    @var staged
 }
+bad_value = "unterminated
+文本 = 0
+stage:
+    staged = 0
 |
 "#;
         let symbols = here(source);
@@ -970,7 +1074,7 @@ mod tests {
             BTreeSet::from([
                 ("before".into(), true),
                 ("after".into(), true),
-                ("a b".into(), true),
+                ("bad_value".into(), true),
                 ("文本".into(), true),
                 ("staged".into(), true),
             ])
@@ -982,8 +1086,87 @@ mod tests {
     }
 
     #[test]
-    fn current_document_scope_ends_at_the_closing_brace() {
-        let source = "@var public\n@sprite \"cat\" {\n@init {}\n@var private\n}\n|";
+    fn assignments_infer_data_kinds_in_scripts_and_preserve_known_private_targets() {
+        let source = r#"shared = 0
+var retired = 1
+list retiredList = {}
+sprite "玩家":
+    init:
+        pass
+    local = 2
+    records = {}
+    def 更新 @amount:
+        generated = 3
+        generatedRecords = {"item"}
+        local += @amount
+        records = {}
+        global:shared += 1
+        说(|)
+"#;
+        let symbols = here(source);
+        assert_eq!(
+            names(&symbols.variables),
+            BTreeSet::from([
+                ("shared".into(), true),
+                ("generated".into(), true),
+                ("local".into(), false),
+            ])
+        );
+        assert_eq!(
+            names(&symbols.lists),
+            BTreeSet::from([("generatedRecords".into(), true), ("records".into(), false),])
+        );
+        assert_eq!(symbols.parameters[0].name, "amount");
+    }
+
+    #[test]
+    fn invalid_kind_changes_preserve_first_assignment_and_scope_kinds() {
+        for (first, second, list) in [("1", "{}", false), ("{}", "1", true)] {
+            let source =
+                format!("start:\n    value = {first}\n    value = {second}\n    等待(|)秒");
+            let symbols = here(&source);
+            assert_eq!(
+                names(&symbols.variables).contains(&("value".into(), true)),
+                !list
+            );
+            assert_eq!(
+                names(&symbols.lists).contains(&("value".into(), true)),
+                list
+            );
+
+            let source = format!(
+                "sprite \"A\":\n    init:\n        pass\n    value = {first}\nsprite \"B\":\n    init:\n        pass\n    start:\n        value = {second}\n        等待(|)秒"
+            );
+            let symbols = here(&source);
+            assert!(symbols.variables.is_empty(), "{source}");
+            assert!(symbols.lists.is_empty(), "{source}");
+
+            let source = format!(
+                "value = {first}\nsprite \"A\":\n    init:\n        pass\n    value = {second}\n    start:\n        等待(|)秒"
+            );
+            let symbols = here(&source);
+            assert_eq!(
+                names(&symbols.variables),
+                if list {
+                    BTreeSet::new()
+                } else {
+                    BTreeSet::from([("value".into(), true)])
+                }
+            );
+            assert_eq!(
+                names(&symbols.lists),
+                if list {
+                    BTreeSet::from([("value".into(), true)])
+                } else {
+                    BTreeSet::new()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn current_document_scope_ends_at_dedent() {
+        let source = "public = 0\nsprite \"cat\" :\n    init :\n        pass\n    private = 0\n|";
         let symbols = here(source);
         assert_eq!(
             names(&symbols.variables),
@@ -998,7 +1181,8 @@ mod tests {
         let main = dir.path().join("main.sbdsl");
         let module = dir.path().join("src/feature.sbdsl");
         let dependency = dir.path().join("src/helper.sbdsl");
-        let current = "import helper\n@sprite \"cat\" add {\n@var unsaved\n当绿旗被点击 {\n[说 $";
+        let current =
+            "import helper\nsprite \"cat\" add :\n    unsaved = 0\n    start :\n        [说 ";
         std::fs::write(
             dir.path().join("sbdsl.buildsb"),
             r#"{"entry":"wrong.sbdsl"}"#,
@@ -1011,15 +1195,15 @@ mod tests {
             ),
             (
                 main.clone(),
-                "@var fromEntry\n@sprite \"cat\" {\n@init {}\n@var private\n}\nimport feature"
+                "fromEntry = 0\nsprite \"cat\" :\n    init :\n        pass\n    private = 0\nimport feature"
                     .into(),
             ),
-            (module.clone(), "@var stale".into()),
+            (module.clone(), "stale = 0".into()),
             (
                 dependency,
-                "import feature\n@list imported\n定义自制积木 帮助 @n {\n[说 @n]\n}".into(),
+                "import feature\nimported = {}\ndef 帮助 @n :\n    说 (@n)".into(),
             ),
-            (dir.path().join("unrelated.sbdsl"), "@var unrelated".into()),
+            (dir.path().join("unrelated.sbdsl"), "unrelated = 0".into()),
         ]);
         let symbols = collect(Some(&module), current, &overlays, current.len());
         assert_eq!(
@@ -1042,7 +1226,7 @@ mod tests {
     fn relative_import_wins_over_source_directory_and_ids_are_distinct() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("nested/main.sbdsl");
-        let source = "import helper\nimport extra\n定义自制积木 主积木 {\n}\n";
+        let source = "import helper\nimport extra\ndef 主积木 :\n    pass\n";
         let overlays = BTreeMap::from([
             (
                 dir.path().join("sbdsl.buildsb"),
@@ -1050,15 +1234,15 @@ mod tests {
             ),
             (
                 dir.path().join("nested/helper.sbdsl"),
-                "@var nearby\n定义自制积木 附近积木 {\n}".into(),
+                "nearby = 0\ndef 附近积木 :\n    pass".into(),
             ),
             (
                 dir.path().join("src/helper.sbdsl"),
-                "@var fallbackMustNotAppear".into(),
+                "fallbackMustNotAppear = 0".into(),
             ),
             (
                 dir.path().join("src/extra.sbdsl"),
-                "@var fallback\n定义自制积木 目录积木 {\n}".into(),
+                "fallback = 0\ndef 目录积木 :\n    pass".into(),
             ),
         ]);
         let symbols = collect(Some(&main), source, &overlays, source.len());
@@ -1079,12 +1263,12 @@ mod tests {
     #[test]
     fn broken_config_or_unrelated_document_does_not_borrow_entry_symbols() {
         let dir = tempfile::tempdir().unwrap();
-        let source = "@var own\n";
+        let source = "own = 0\n";
         let module = dir.path().join("unrelated.sbdsl");
         let config = dir.path().join("sbdsl.buildsb");
         let mut overlays = BTreeMap::from([
             (config.clone(), "{".into()),
-            (dir.path().join("main.sbdsl"), "@var otherProject".into()),
+            (dir.path().join("main.sbdsl"), "otherProject = 0".into()),
         ]);
         for config_source in [
             "{",
@@ -1101,16 +1285,27 @@ mod tests {
     }
 
     #[test]
-    fn quoted_names_and_utf8_offsets_do_not_change_scope() {
-        let source = "@var \"😀 分数\"\n@sprite \"猫😀\" {\n@init {}\n@list \"背包 东西\"\n定义自制积木 告诉 @\"\" {\n[说 $";
+    fn quoted_data_declarations_do_not_create_completion_symbols() {
+        let symbols =
+            here("var \"bad name\" = 1\nlist \"bad list\" = {}\nvalid = 1\nstart:\n    说 |");
+        assert_eq!(
+            names(&symbols.variables),
+            BTreeSet::from([("valid".into(), true)])
+        );
+        assert!(symbols.lists.is_empty());
+    }
+
+    #[test]
+    fn unicode_names_and_quoted_parameters_preserve_scope() {
+        let source = "特殊分数 = 0\nsprite \"猫😀\" :\n    init :\n        pass\n    背包东西 = {}\n    def 告诉 @\"\" :\n        [说 ";
         let symbols = collect(None, source, &BTreeMap::new(), source.len());
         assert_eq!(
             names(&symbols.variables),
-            BTreeSet::from([("😀 分数".into(), true)])
+            BTreeSet::from([("特殊分数".into(), true)])
         );
         assert_eq!(
             names(&symbols.lists),
-            BTreeSet::from([("背包 东西".into(), false)])
+            BTreeSet::from([("背包东西".into(), false)])
         );
         assert_eq!(symbols.parameters[0].name, "");
     }

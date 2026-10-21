@@ -80,8 +80,8 @@ export async function run(): Promise<void> {
   await replace(document, original);
   await eventually(() => vscode.languages.getDiagnostics(sourceUri).length === 0, 'source diagnostic cleared');
 
-  await replace(document, original.replace('[将 $score 增加 1]', '[不存在的动作]\n        [说 $list:missing]') +
-    '@var invalid = []\n@list alsoInvalid = [1,]\n');
+  await replace(document, original.replace('score += 1', '不存在的动作\n        删除(missing)的全部项目') +
+    "invalid = []\nalsoInvalid = {1,}\n");
   await eventually(() => vscode.languages.getDiagnostics(sourceUri).length === 4, 'multiple AST diagnostics');
   assert.ok(vscode.languages.getDiagnostics(sourceUri).every(item => item.severity === vscode.DiagnosticSeverity.Error));
   await replace(document, original);
@@ -90,7 +90,7 @@ export async function run(): Promise<void> {
   const importedUri = vscode.Uri.file(path.join(workspace, 'src', 'module.sbdsl'));
   const importedOriginal = await fs.readFile(importedUri.fsPath, 'utf8');
   try {
-    await fs.writeFile(importedUri.fsPath, importedOriginal + '@var invalid = []\n@list alsoInvalid = [1,]\n');
+    await fs.writeFile(importedUri.fsPath, importedOriginal + "invalid = []\nalsoInvalid = {1,}\n");
     await eventually(() => vscode.languages.getDiagnostics(importedUri).length === 2, 'unopened module AST diagnostics');
     assert.ok(!vscode.workspace.textDocuments.some(item => item.uri.toString() === importedUri.toString()));
     await replace(document, original.replace('import module\n', ''));
@@ -101,41 +101,65 @@ export async function run(): Promise<void> {
   }
   await eventually(() => vscode.languages.getDiagnostics(sourceUri).length === 0, 'project diagnostics cleared');
 
+  await replace(document, original.replace('score += 1', '移'));
+  const completionPosition = document.positionAt(document.getText().indexOf('移') + 1);
   const completions = await vscode.commands.executeCommand<vscode.CompletionList>(
-    'vscode.executeCompletionItemProvider', sourceUri, new vscode.Position(4, 8));
+    'vscode.executeCompletionItemProvider', sourceUri, completionPosition);
   assert.ok(completions && completions.items.length > 0, 'server completion items');
+  await replace(document, original);
 
-  const symbolSource = '@var score = 0\n@list "日志 😀" = []\n' +
-    '定义自制积木 公共动作 { [等待 0 秒] }\n' +
-    '@sprite "玩家" {\n @init {}\n @var hp = 100\n' +
-    ' 定义自制积木 私有动作 { [等待 0 秒] }\n' +
-    ' 当绿旗被点击 {\n  CALL\n }\n}\nimport module\n';
-  await chooseSymbol(document, symbolSource.replace('CALL', '[说 $h|pSuffix]'), '$hp');
-  assert.ok(document.getText().includes('[说 $hp]'), 'replace only the full variable reference');
-  assert.ok(!document.getText().includes('Suffix'));
-  await chooseSymbol(document, symbolSource.replace('CALL', '[说 $list:|]'), '$list:"日志 😀"');
-  assert.ok(document.getText().includes('[说 $list:"日志 😀"]'), 'quoted list completion');
-  await chooseSymbol(document, symbolSource.replace('CALL', '[私|]'), '[私有动作]');
-  assert.ok(document.getText().includes('[私有动作]'), 'private procedure completion');
-  await chooseSymbol(document, symbolSource.replace('CALL', '[公|]'), '[公共动作]');
-  assert.ok(document.getText().includes('[公共动作]'), 'public procedure completion');
+  const symbolSource = "score = 0\n特殊名称 = 1\n日志 = {}\n" +
+    "def 公共动作:\n    等待(0)秒\n" +
+    "sprite \"玩家\":\n    init:\n        pass\n    hp = 100\n" +
+    "    def 私有动作:\n        等待(0)秒\n" +
+    "    start:\n        CALL\nimport module\n";
+  for (const [marked, label, expected] of [
+    ['说(h|pSuffix)', 'hp', '说(hp)'],
+    ['h|pSuffix = 10', 'hp', 'hp = 10'],
+    ['hp = h|pSuffix + 1', 'hp', 'hp = hp + 1'],
+    ['说(global:|)', 'global:score', '说(global:score)'],
+    ['说(特殊|)', '特殊名称', '说(特殊名称)'],
+    ['将("item")加入(日|志Suffix)', '日志', '将("item")加入(日志)'],
+    ['将("item")加入(global:|)', 'global:日志', '将("item")加入(global:日志)'],
+    ['私|', '私有动作', '私有动作'],
+    ['公|', '公共动作', '公共动作']
+  ]) {
+    await chooseSymbol(document, symbolSource.replace('CALL', marked), label);
+    assert.ok(document.getText().includes(expected), 'completion: ' + marked);
+    assert.ok(!document.getText().includes('Suffix'), 'replace the full reference: ' + marked);
+  }
   await replace(document, original);
   await eventually(() => vscode.languages.getDiagnostics(sourceUri).length === 0, 'symbol edits cleared');
 
+  for (const invalid of [
+    original + '\nconflict = 0\nconflict = {}\n',
+    original + '\n"invalid name" = 0\n',
+    symbolSource.replace('CALL', '日志 = 1')
+  ]) {
+    await replace(document, invalid);
+    await eventually(() => vscode.languages.getDiagnostics(sourceUri).some(item =>
+      item.severity === vscode.DiagnosticSeverity.Error), 'data name or type error');
+    await replace(document, original);
+    await eventually(() => vscode.languages.getDiagnostics(sourceUri).length === 0, 'data name or type error cleared');
+  }
+
   const operatorCalls = [
-    '[说 (1 + 2)]', '[说 (1-2)]', '[说 (2*3)]', '[说 (8 / 2)]',
-    '[说 (7 mod 3)]', '[说 (8/(6/2))]', '[说 (-1.5e-2/-2e+3)]',
-    '[等待直到 <$score<1>]', '[等待直到 <$score>100>]', '[等待直到 <$score=100>]',
-    "[等待直到 <碰到 /'边缘'/ ?>]"
+    '说(1 + 2)', '说(1-2)', '说(2*3)', '说(8 / 2)',
+    "说(7 % 3)", '说(8/(6/2))', '说(-1.5e-2/-2e+3)',
+    'score = 1+2*3', 'score += 1', 'score -= 1', 'score *= 2', 'score /= 2', 'score %= 3', 'runtimeLogs = {}', 'runtimeLogs = {1, "item"}',
+    '等待直到<score<1>', '等待直到<score>100>', '等待直到<score=100>',
+    "等待直到<碰到('边缘')?>"
   ].join('\n        ');
-  await replace(document, original.replace('[将 $score 增加 1]', '[说 (1 +* 2)]'));
+  await replace(document, original.replace('score += 1', '说(1 +* 2)'));
   await eventually(() => vscode.languages.getDiagnostics(sourceUri).length > 0, 'retired arithmetic operator diagnostic');
-  await replace(document, original.replace('[将 $score 增加 1]', operatorCalls));
+  await replace(document, original.replace('score += 1', operatorCalls));
   await eventually(() => vscode.languages.getDiagnostics(sourceUri).length === 0, 'ordinary comparison operators and quoted menus');
-  for (const rejected of ['[等待直到 <$score >* 100>]', '[等待直到 <碰到 /边缘/ ?>]']) {
-    await replace(document, original.replace('[将 $score 增加 1]', rejected));
+  for (const rejected of ['[说 (score)]', '说 score', 'var legacy = 0', 'list legacy = {}', '说($score)', '将(score)设为(10)', '将(score)增加(1)',
+    '说(var:score)', '说(list:score)', '说(global:list:score)', '说(global:"score")',
+    '等待直到<score >* 100>', '等待直到<碰到 /边缘/ ?>']) {
+    await replace(document, original.replace('score += 1', rejected));
     await eventually(() => vscode.languages.getDiagnostics(sourceUri).length > 0, 'retired syntax diagnostic: ' + rejected);
-    await replace(document, original.replace('[将 $score 增加 1]', operatorCalls));
+    await replace(document, original.replace('score += 1', operatorCalls));
     await eventually(() => vscode.languages.getDiagnostics(sourceUri).length === 0, 'new syntax clears retired syntax diagnostic');
   }
   await replace(document, original);

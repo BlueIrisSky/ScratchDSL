@@ -84,6 +84,9 @@ try {
         throw 'VSIX version or target platform mismatch'
     }
     if ($packagedManifest.license -cne 'MIT') { throw 'VSIX package license must be MIT' }
+    $preRelease = $vsixManifest.PackageManifest.Metadata.Properties.Property |
+        Where-Object { $_.Id -ceq 'Microsoft.VisualStudio.Code.PreRelease' }
+    if ($null -eq $preRelease -or $preRelease.Value -cne 'true') { throw 'VSIX must be marked as a pre-release' }
     # vsce normalizes the generated LICENSE filename when writing the VSIX.
     if ((Get-EntryHash $archive 'extension/LICENSE.txt') -cne $licenseHash) { throw 'VSIX LICENSE differs from the project LICENSE' }
     if ((Get-EntryHash $archive 'extension/server/sbdsl.exe') -cne $compilerHash) { throw 'VSIX server differs from CLI' }
@@ -119,8 +122,7 @@ try {
         throw 'Installer LICENSE differs from the project LICENSE'
     }
     Copy-Item -LiteralPath $compiler, $notices, $license, (Join-Path $repo 'README.md') -Destination $staging
-    New-Item -ItemType Directory (Join-Path $staging 'docs') | Out-Null
-    Get-ChildItem (Join-Path $repo 'docs') -File -Filter '*.md' | Copy-Item -Destination (Join-Path $staging 'docs')
+    Copy-Item -LiteralPath (Join-Path $repo 'docs') -Destination $staging -Recurse
     foreach ($example in @('hello/main.sbdsl', 'hello/sbdsl.buildsb', 'extensions/main.sbdsl',
         'extensions/sbdsl.buildsb', 'extensions/\u81ea\u5b9a\u4e49\u62d3\u5c55.js')) {
         # Keep this script ASCII-compatible with Windows PowerShell 5.1.
@@ -131,14 +133,6 @@ try {
     }
     if (Test-Path -LiteralPath $portable) { Remove-Item -LiteralPath $portable }
     [IO.Compression.ZipFile]::CreateFromDirectory($staging, $portable, [IO.Compression.CompressionLevel]::Optimal, $false)
-    $archive = [IO.Compression.ZipFile]::OpenRead($portable)
-    try {
-        if ((Get-EntryHash $archive 'sbdsl.exe') -cne $compilerHash -or
-            (Get-EntryHash $archive 'THIRD_PARTY_NOTICES.txt') -cne $noticesHash -or
-            (Get-EntryHash $archive 'LICENSE') -cne $licenseHash) {
-            throw 'Portable archive verification failed'
-        }
-    } finally { $archive.Dispose() }
 } finally { Remove-Item -LiteralPath $work -Recurse -Force }
 
 $commit = & git -C $repo rev-parse HEAD

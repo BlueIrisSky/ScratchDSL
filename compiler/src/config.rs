@@ -4,7 +4,6 @@ use crate::{
     analysis::{DiskSource, SourceProvider},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE: &str = "sbdsl.buildsb";
@@ -43,17 +42,19 @@ impl<'de> Deserialize<'de> for ExtensionSpec {
         #[serde(deny_unknown_fields)]
         struct Named {
             path: PathBuf,
-            alias: Option<String>,
+            alias: String,
         }
 
-        let spec = match Input::deserialize(deserializer)? {
-            Input::Path(path) => Self::from(path),
-            Input::Named(Named { path, alias }) => Self { path, alias },
-        };
-        if let Some(alias) = &spec.alias {
-            validate_extension_alias(alias).map_err(serde::de::Error::custom)?;
+        match Input::deserialize(deserializer)? {
+            Input::Path(path) => Ok(Self::from(path)),
+            Input::Named(Named { path, alias }) => {
+                validate_extension_alias(&alias).map_err(serde::de::Error::custom)?;
+                Ok(Self {
+                    path,
+                    alias: Some(alias),
+                })
+            }
         }
-        Ok(spec)
     }
 }
 
@@ -147,6 +148,12 @@ pub fn discover(input: Option<&Path>, output: Option<&Path>, cwd: &Path) -> Resu
     discover_with_provider(input, output, cwd, &DiskSource)
 }
 
+fn find_config(dir: &Path, provider: &dyn SourceProvider) -> Option<PathBuf> {
+    dir.ancestors()
+        .map(|p| p.join(CONFIG_FILE))
+        .find(|p| provider.is_file(p))
+}
+
 /// CLI discovery semantics, with reads/existence supplied by a source snapshot.
 pub fn discover_with_provider(
     input: Option<&Path>,
@@ -159,15 +166,42 @@ pub fn discover_with_provider(
         .as_ref()
         .filter(|p| p.extension().is_some_and(|e| e == "sbdsl"));
     let config_path = if let Some(source) = direct_source {
-        source.parent().and_then(|parent| {
-            parent
-                .ancestors()
-                .map(|p| p.join(CONFIG_FILE))
-                .find(|p| provider.is_file(p))
-        })
+        source
+            .parent()
+            .and_then(|parent| find_config(parent, provider))
     } else {
         Some(input.clone().unwrap_or_else(|| cwd.join(CONFIG_FILE)))
     };
+    load_config(
+        direct_source.map(PathBuf::as_path),
+        config_path,
+        output,
+        cwd,
+        provider,
+    )
+}
+
+/// Editor discovery deliberately keeps the nearest config's declared entry.
+/// Passing the opened module to CLI discovery would incorrectly override it.
+pub fn discover_for_document(path: &Path, provider: &dyn SourceProvider) -> Result<BuildConfig> {
+    let path = provider.identity(path);
+    let parent = path.parent().unwrap_or(Path::new("."));
+    if is_config(&path) {
+        load_config(None, Some(path.clone()), None, parent, provider)
+    } else if let Some(config) = find_config(parent, provider) {
+        load_config(None, Some(config), None, parent, provider)
+    } else {
+        load_config(Some(&path), None, None, parent, provider)
+    }
+}
+
+fn load_config(
+    direct_source: Option<&Path>,
+    config_path: Option<PathBuf>,
+    output: Option<&Path>,
+    cwd: &Path,
+    provider: &dyn SourceProvider,
+) -> Result<BuildConfig> {
     let config = if let Some(path) = &config_path {
         if !is_config(path) {
             return Err(
@@ -180,18 +214,13 @@ pub fn discover_with_provider(
         Config::default()
     };
     let error_path = config_path
-        .clone()
-        .or_else(|| input.clone())
-        .unwrap_or_else(|| cwd.join(CONFIG_FILE));
+        .as_deref()
+        .or(direct_source)
+        .expect("either a config path or a direct source path is present");
+    let base_dir = error_path.parent().unwrap_or(cwd).to_path_buf();
     (|| {
-        let base_dir = config_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .or_else(|| direct_source.and_then(|p| p.parent()))
-            .unwrap_or(cwd)
-            .to_path_buf();
         let entry = if let Some(source) = direct_source {
-            source.clone()
+            source.to_path_buf()
         } else {
             resolve(
                 &base_dir,
@@ -237,31 +266,10 @@ pub fn discover_with_provider(
             src_dir,
             output,
             extensions,
-            config_path,
+            config_path: config_path.clone(),
         })
     })()
-    .map_err(|error| error.in_file(&error_path))
-}
-
-/// Editor discovery deliberately keeps the nearest config's declared entry.
-/// Passing the opened module to CLI discovery would incorrectly override it.
-pub fn discover_for_document(path: &Path, provider: &dyn SourceProvider) -> Result<BuildConfig> {
-    let path = provider.identity(path);
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let config = if is_config(&path) {
-        Some(path.clone())
-    } else {
-        parent
-            .ancestors()
-            .map(|p| p.join(CONFIG_FILE))
-            .find(|p| provider.is_file(p))
-    };
-    discover_with_provider(
-        Some(config.as_deref().unwrap_or(&path)),
-        None,
-        parent,
-        provider,
-    )
+    .map_err(|error| error.in_file(error_path))
 }
 
 fn validate(config: &Config) -> Result<()> {
@@ -275,10 +283,6 @@ fn validate(config: &Config) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-pub fn json_literal(value: &Value) -> String {
-    value.to_string()
 }
 
 #[cfg(test)]

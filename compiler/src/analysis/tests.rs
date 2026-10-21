@@ -8,11 +8,11 @@ fn recovery_reports_syntax_import_and_binding_errors_across_the_project() {
     let main = directory.path().join("main.sbdsl");
     let broken = directory.path().join("broken.sbdsl");
     let healthy = directory.path().join("healthy.sbdsl");
-    let source = "@var broken = []\n@list brokenList = [1,]\nimport missing\n@sprite \"玩家\" {\n @init {}\n 当绿旗被点击 {\n  [不存在的动作]\n  [说 $list:missing]\n  [说 @missing]\n  [后续动作]\n }\n}\nimport broken\nimport healthy\n";
+    let source = "broken = \nbrokenList = {1,}\nimport missing\nsprite \"玩家\":\n    init:\n        pass\n    start:\n        不存在的动作\n        删除 (missing) 的全部项目\n        说 (@missing)\n        后续动作\nimport broken\nimport healthy\n";
     let broken_source =
-        "@var alsoBroken = []\n@sprite \"玩家\" add {\n 当绿旗被点击 { [另一个不存在的动作] }\n}\n";
+        "alsoBroken = \nsprite \"玩家\" add:\n    start:\n        另一个不存在的动作\n";
     fs::write(&broken, broken_source).unwrap();
-    fs::write(&healthy, "定义自制积木 后续动作 { [等待 0 秒] }\n").unwrap();
+    fs::write(&healthy, "def 后续动作:\n    等待 (0) 秒\n").unwrap();
     let overlays = BTreeMap::from([(main.clone(), source.into())]);
     let result = analyze_document(&main, &overlays, &mut AnalysisCache::default(), true);
     let main_errors: Vec<_> = result
@@ -32,7 +32,7 @@ fn recovery_reports_syntax_import_and_binding_errors_across_the_project() {
             .iter()
             .any(|d| d.message.contains("找不到模块 missing"))
     );
-    for text in ["[不存在的动作]", "[说 $list:missing]", "[说 @missing]"] {
+    for text in ["不存在的动作", "删除 (missing) 的全部项目", "说 (@missing)"] {
         assert!(
             main_errors.iter().any(|d| &source[d.start..d.end] == text),
             "{text}: {main_errors:?}"
@@ -62,9 +62,9 @@ fn snapshot_analysis_keeps_project_and_unimported_document_diagnostics_separate(
     let config = directory.path().join("sbdsl.buildsb");
     let overlays = BTreeMap::from([
         (config, r#"{"entry":"main.sbdsl"}"#.into()),
-        (main.clone(), "import library\n@var bad = []\n".into()),
-        (library.clone(), "@var alsoBad = []\n".into()),
-        (orphan.clone(), "@var a = []\n@list b = [1,]\n".into()),
+        (main.clone(), "import library\nbad = \n".into()),
+        (library.clone(), "alsoBad = \n".into()),
+        (orphan.clone(), "a = \nb = {1,}\n".into()),
     ]);
     let paths = vec![main.clone(), library.clone(), orphan.clone()];
     let results = analyze_documents(&paths, &overlays, &mut AnalysisCache::default(), false);
@@ -100,8 +100,8 @@ fn unavailable_extensions_do_not_hide_project_syntax_errors() {
             directory.path().join("sbdsl.buildsb"),
             r#"{"entry":"main.sbdsl","extensions":["自定义拓展.js"]}"#.into(),
         ),
-        (main.clone(), "@var bad = []\nimport library\n".into()),
-        (library.clone(), "@var alsoBad = []\n".into()),
+        (main.clone(), "bad = \nimport library\n".into()),
+        (library.clone(), "alsoBad = \n".into()),
     ]);
     let mut cache = AnalysisCache::default();
     let trusted = analyze_document(&main, &overlays, &mut cache, true);
@@ -127,8 +127,15 @@ fn unsaved_import_and_config_keep_the_project_entry() {
     let config = directory.path().join("sbdsl.buildsb");
     let overlays = BTreeMap::from([
         (config, r#"{"entry":"main.sbdsl"}"#.into()),
-        (main, "@sprite \"玩家\" { @init {} }\nimport parts\n".into()),
-        (part.clone(), "当绿旗被点击 { [不存在的积木] }\n@sprite \"玩家\" add { 当绿旗被点击 { [移动 1 步] } }\n".into()),
+        (
+            main,
+            "sprite \"玩家\":\n    init:\n        pass\nimport parts\n".into(),
+        ),
+        (
+            part.clone(),
+            "start:\n    不存在的积木\nsprite \"玩家\" add:\n    start:\n        移动 (1) 步\n"
+                .into(),
+        ),
     ]);
     let result = analyze_document(&part, &overlays, &mut AnalysisCache::default(), true);
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
@@ -142,7 +149,7 @@ fn config_overlay_changes_entry_and_invalid_config_does_not_reuse_old_state() {
     let config = directory.path().join("sbdsl.buildsb");
     fs::write(&config, r#"{"entry":"missing.sbdsl"}"#).unwrap();
     let mut overlays = BTreeMap::from([
-        (main.clone(), "@var score = 1\n".into()),
+        (main.clone(), "score = 1\n".into()),
         (config.clone(), r#"{"entry":"main.sbdsl"}"#.into()),
     ]);
     let mut cache = AnalysisCache::default();
@@ -162,7 +169,7 @@ fn config_overlay_changes_entry_and_invalid_config_does_not_reuse_old_state() {
 fn syntax_error_retains_utf8_range_and_plain_message() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("中文 😀.sbdsl");
-    let text = "@var 名字 = 1\r\n💥";
+    let text = "名字 = 1\r\n💥";
     let error = parser::parse(&path, text).unwrap_err();
     let span = error.span().unwrap();
     assert_eq!(span.start, text.find('💥').unwrap());
@@ -187,8 +194,8 @@ fn syntax_in_an_open_unimported_module_is_still_reported() {
             directory.path().join("sbdsl.buildsb"),
             r#"{"entry":"main.sbdsl"}"#.into(),
         ),
-        (main, "@var score = 0\n".into()),
-        (orphan.clone(), "当绿旗被点击 { [说 \"unfinished".into()),
+        (main, "score = 0\n".into()),
+        (orphan.clone(), "start:\n    [说 \"unfinished".into()),
     ]);
     let result = analyze_document(&orphan, &overlays, &mut AnalysisCache::default(), true);
     assert_eq!(result.diagnostics.len(), 1);
@@ -199,7 +206,7 @@ fn syntax_in_an_open_unimported_module_is_still_reported() {
 fn diagnostics_check_targets_without_loading_or_decoding_assets() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("main.sbdsl");
-    let source = "@sprite \"玩家\" {\n@init {\"costumes\":[{\"name\":\"missing\",\"path\":\"does-not-exist.svg\"}]}\n当绿旗被点击 { [移动 1 步] }\n}\n";
+    let source = "sprite \"玩家\":\n    init:\n        \"costumes\":[{\"name\":\"missing\",\"path\":\"does-not-exist.svg\"}]\n    start:\n        移动 (1) 步\n";
     let mut overlays = BTreeMap::from([(path.clone(), source.into())]);
     let mut cache = AnalysisCache::default();
     assert!(
@@ -207,13 +214,13 @@ fn diagnostics_check_targets_without_loading_or_decoding_assets() {
             .diagnostics
             .is_empty()
     );
-    overlays.insert(path.clone(), "当绿旗被点击 { [移动 1 步] }".into());
+    overlays.insert(path.clone(), "start:\n    移动 (1) 步".into());
     let result = analyze_document(&path, &overlays, &mut cache, true);
     assert_eq!(result.diagnostics.len(), 1);
     assert!(result.diagnostics[0].message.contains("舞台不支持"));
     assert_eq!(
         &overlays[&path][result.diagnostics[0].start..result.diagnostics[0].end],
-        "[移动 1 步]"
+        "移动 (1) 步"
     );
 }
 
@@ -221,7 +228,7 @@ fn diagnostics_check_targets_without_loading_or_decoding_assets() {
 fn shared_binding_keeps_public_lexical_scope_and_implicit_globals() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("main.sbdsl");
-    let source = "@var x = 3\n定义自制积木 公共动作 {\n[将 $x 设为 1]\n[将 $implicit 设为 2]\n}\n@sprite \"玩家\" {\n@init {}\n@var x = 9\n当绿旗被点击 { [公共动作] }\n}\n";
+    let source = "x = 3\ndef 公共动作:\n    x = 1\n    implicit = 2\nsprite \"玩家\":\n    init:\n        pass\n    x = 9\n    start:\n        公共动作\n";
     let provider = OverlaySource::new(&BTreeMap::from([(path.clone(), source.into())]));
     let project = project::load_with_provider(&path, directory.path(), &provider).unwrap();
     let bound = bind::bind_project(&project, &Registry::new()).unwrap();
@@ -238,8 +245,7 @@ fn shared_binding_keeps_public_lexical_scope_and_implicit_globals() {
 fn public_target_restrictions_apply_only_when_instantiated() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("main.sbdsl");
-    let mut overlays =
-        BTreeMap::from([(path.clone(), "定义自制积木 动作 { [移动 1 步] }\n".into())]);
+    let mut overlays = BTreeMap::from([(path.clone(), "def 动作:\n    移动 (1) 步\n".into())]);
     let mut cache = AnalysisCache::default();
     assert!(
         analyze_document(&path, &overlays, &mut cache, true)
@@ -249,7 +255,7 @@ fn public_target_restrictions_apply_only_when_instantiated() {
     overlays
         .get_mut(&path)
         .unwrap()
-        .push_str("当绿旗被点击 { [动作] }\n");
+        .push_str("start:\n    动作\n");
     let result = analyze_document(&path, &overlays, &mut cache, true);
     assert!(result.diagnostics[0].message.contains("舞台不支持"));
 }
@@ -266,7 +272,7 @@ fn extension_schema_cache_tracks_saved_content_and_caches_failures() {
             directory.path().join("sbdsl.buildsb"),
             r#"{"entry":"main.sbdsl","extensions":["自定义拓展.js"]}"#.into(),
         ),
-        (path.clone(), "当绿旗被点击 { \"自定义拓展\".[做] }".into()),
+        (path.clone(), "start:\n    \"自定义拓展\".做".into()),
     ]);
     let mut cache = AnalysisCache::default();
     assert!(
@@ -318,7 +324,7 @@ fn extension_alias_overlay_refreshes_cached_namespaces_and_completion() {
         format!("entry: \"main.sbdsl\"\nextensions: [\"自定义拓展.js\" as \"{alias}\"]\n")
     };
     fs::write(&config, config_source("first")).unwrap();
-    let mut overlays = BTreeMap::from([(path.clone(), "当绿旗被点击 { first.[做] }".into())]);
+    let mut overlays = BTreeMap::from([(path.clone(), "start:\n    first.做".into())]);
     let mut cache = AnalysisCache::default();
     let first = analyze_document(&path, &overlays, &mut cache, true);
     assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
@@ -339,25 +345,31 @@ fn extension_alias_overlay_refreshes_cached_namespaces_and_completion() {
                 .any(|template| { template.namespace.as_deref() == Some(namespace) }),
             "obsolete namespace {namespace}"
         );
-        let source = format!("当绿旗被点击 {{ \"{namespace}\".[做");
+        let source = format!("start:\n    \"{namespace}\".做");
         assert!(
             crate::lsp::completion::complete(
                 &source,
-                lsp_types::Position::new(0, source.encode_utf16().count() as u32),
+                lsp_types::Position::new(
+                    1,
+                    source.lines().last().unwrap().encode_utf16().count() as u32
+                ),
                 &renamed.registry,
             )
             .is_empty()
         );
     }
-    let source = "当绿旗被点击 { second.[做";
+    let source = "start:\n    second.做";
     let completions = crate::lsp::completion::complete(
         source,
-        lsp_types::Position::new(0, source.encode_utf16().count() as u32),
+        lsp_types::Position::new(
+            1,
+            source.lines().last().unwrap().encode_utf16().count() as u32,
+        ),
         &renamed.registry,
     );
     assert_eq!(completions.len(), 1, "{completions:?}");
-    assert_eq!(completions[0].label, "second.[做]");
-    overlays.insert(path.clone(), "当绿旗被点击 { second.[做] }".into());
+    assert_eq!(completions[0].label, "second.做");
+    overlays.insert(path.clone(), "start:\n    second.做".into());
     assert!(
         analyze_document(&path, &overlays, &mut cache, true)
             .diagnostics
@@ -403,7 +415,7 @@ fn missing_path_identity_is_stable_when_saved() {
 fn untrusted_builtin_projects_still_report_semantics_and_import_errors() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("main.sbdsl");
-    let mut overlays = BTreeMap::from([(path.clone(), "当绿旗被点击 { [移动 1 步] }".into())]);
+    let mut overlays = BTreeMap::from([(path.clone(), "start:\n    移动 (1) 步".into())]);
     let mut cache = AnalysisCache::default();
     let result = analyze_document(&path, &overlays, &mut cache, false);
     assert!(result.diagnostics[0].message.contains("舞台不支持"));
@@ -423,7 +435,7 @@ fn windows_identity_preserves_unicode_filename_and_matches_ascii_case() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("İ-Module.sbdsl");
     let before = normalize_path(&path);
-    fs::write(&path, "@var value = 1\n").unwrap();
+    fs::write(&path, "value = 1\n").unwrap();
     assert_eq!(before, normalize_path(&path));
     assert_eq!(
         before,

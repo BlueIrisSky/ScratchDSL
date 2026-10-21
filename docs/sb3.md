@@ -27,9 +27,9 @@
 
 变量值编码为 `[12, varName, varId]`，列表值为 `[13, listName, listId]`。它们可以代替上表中的子积木 ID，例如数值输入中的变量是 `[3, [12, varName, varId], [4, "0"]]`。ID 来自绑定结果，不能用显示名称代替。
 
-布尔输入使用 `[2, boolBlockId]`。`<true>` 和 `<false>` 生成比较积木，再引用其 ID。空槽 `<>` 是专门的 AST 标记，序列化时省略对应的 `inputs` 项；它不表示 `false`，也没有 text shadow。显式调用 `ext::"ready".<>` 的空参数区则表示零参数布尔积木。
+布尔输入使用 `[2, boolBlockId]`。`<true>` 和 `<false>` 生成比较积木，再引用其 ID。空槽 `<>` 是专门的 AST 标记，序列化时省略对应的 `inputs` 项；它不表示 `false`，也没有 text shadow。显式调用 `<ext::"ready"()>` 的空参数区则表示零参数布尔积木。
 
-内置控制积木的 `SUBSTACK` 为 `[2, firstSubBlockId]`，否则分支写入 `SUBSTACK2`；空子栈为 `[2, null]`。它们由专门的 AST 节点生成，扩展 `conditional` 和 `loop` 尚未支持。
+控制积木的第一个分支写入 `SUBSTACK: [2, firstSubBlockId]`，后续分支依次写入 `SUBSTACK2`、`SUBSTACK3` 等；空子栈为 `[2, null]`。内置控制流和扩展 C 型积木都使用这套连接方式。扩展根据 `branchCount` 校验缩进体数量，并按显示文字中的槽位顺序把参数映射到原始输入名称。
 
 参数子块、shadow 和子栈首块的 `parent` 指向所属块。栈中的后续语句以之前一块为 `parent`，按顺序连接 `next`，最后一块的 `next` 为 `null`。压缩 primitive 的父关系由输入位置表示。
 
@@ -37,7 +37,7 @@
 
 ## 菜单与字段
 
-静态菜单保留有序的 `text`、`value` 对。菜单字面量先按精确 `value` 匹配，再按唯一的 `text` 别名匹配；别名不唯一时报错。AST 保存解析后的 `value`，代码生成只写该值。菜单源码统一写成 `/'选项'/`，单引号与外层斜杠不写入项目。
+静态菜单保留有序的 `text`、`value` 对。菜单字面量先按精确 `value` 匹配，再按唯一的 `text` 别名匹配；别名不唯一时报错。AST 保存解析后的 `value`，代码生成只写该值。菜单源码统一写成 `'选项'`，用于分隔内容的单引号不写入项目。
 
 ### 扩展菜单
 
@@ -66,13 +66,15 @@ topLevel: false
 
 内置菜单使用模板明确给出的存储位置、shadow opcode 和字段名，不套用扩展命名公式。例如 `event_whenkeypressed` 写父块的 `fields.KEY_OPTION`；`motion_goto` 使用 `motion_goto_menu` shadow，字段为 `TO`。
 
+源码 `logs = {"a", 1}` 的运行时列表重置生成清空列表和逐项追加积木，目标种类由绑定阶段确认。
+
 变量操作目标写 `fields.VARIABLE = [varName, varId]`，列表操作目标写 `fields.LIST = [listName, listId]`。两者都使用已绑定的符号 ID。
 
 广播统一在 Stage 的 `broadcasts` 表中保存 `broadcastId → broadcastName`。接收广播帽子写 `fields.BROADCAST_OPTION = [broadcastName, broadcastId]`；发送广播的菜单值为 `[1, [11, broadcastName, broadcastId]]`。表达式覆盖广播菜单时，保留这个 shadow，按普通输入关系连接。广播是内置模板的符号引用特例，第三方参数类型无需增加广播类型。
 
 ## 自制积木
 
-绑定前，`@stage { ... }` 中的声明按源位置展开，与该位置的顶层声明等价。过程签名由规范化空白后的固定文本和有序槽位类型组成，参数名不参与签名。同一作用域出现重复签名时报错。
+绑定前，`stage:` 的缩进体 中的声明按源位置展开，与该位置的顶层声明等价。过程签名由规范化空白后的固定文本和有序槽位类型组成，参数名不参与签名。同一作用域出现重复签名时报错。
 
 过程体中的调用和变量引用按定义处的词法作用域绑定。公共过程复制到角色之后，内部调用仍指向原来绑定的过程，不会被角色的同签名私有过程替换。
 
@@ -100,9 +102,9 @@ topLevel: false
 
 顶层事件和 `procedures_definition` 的 `topLevel` 为 `true`，`parent` 为 `null`。画布按脚本顺序排成四列，坐标为 `x = 40 + (index % 4) * 350`、`y = 40 + (index / 4) * 250`，其中 `index / 4` 取整。
 
-角色的 `@init` 写入 target 的 `x`、`y`、`size`、`direction`、`visible`、`rotationStyle`、`costumes` 和 `sounds`，不生成绿旗初始化脚本。`currentCostume` 为 `0`，选中第一项造型；造型列表为空时使用默认空白造型。字段类型和默认值见[角色](./sprites.md)。
+角色的 `init` 写入 target 的 `x`、`y`、`size`、`direction`、`visible`、`rotationStyle`、`costumes` 和 `sounds`，不生成绿旗初始化脚本。`currentCostume` 为 `0`，选中第一项造型；造型列表为空时使用默认空白造型。字段类型和默认值见[角色](./sprites.md)。
 
-角色资源路径相对于 `@init` 所在文件，导入模块时保留该来源。舞台资源来自 `sbdsl.buildsb.stage`，相对于配置文件。两者均拒绝 URL；`sbdsl.buildsb` 中的 `sprites` 按未知字段报错。
+角色资源路径相对于 `init` 所在文件，导入模块时保留该来源。舞台资源来自 `sbdsl.buildsb.stage`，相对于配置文件。两者均拒绝 URL；`sbdsl.buildsb` 中的 `sprites` 按未知字段报错。
 
 造型支持 SVG、PNG，音频支持 WAV、MP3。资源按实际字节计算 MD5，以 `<md5>.<ext>` 保存；默认空白 SVG 也执行相同处理。`assetId`、`md5ext` 和 ZIP 内的文件名必须一致。
 
@@ -116,7 +118,7 @@ topLevel: false
 
 `project.json.extensions` 和 `extensionURLs` 的键使用真实扩展 ID。所有配置扩展的源码都内联为 `data:application/javascript;charset=utf-8;base64,...`，写入 `extensionURLs[extensionId]`。该字段不写远程地址或本地文件路径，也没有关闭内联的选项。字段格式见 [TurboWarp 序列化代码](https://github.com/TurboWarp/scratch-vm/blob/develop/src/serialization/sb3.js)。
 
-支持的参数类型为 `string`、`number`、`Boolean`、`color`、`angle` 和模板内部的变量、列表引用。`matrix`、`note`、`image`、扩展 `conditional` / `loop`、多段 `text` 等尚未支持，遇到时明确报错。label、button、separator 等纯 GUI 项略过。显式 opcode 调用也遵循这些限制，细节见[模板实现](./templates.md)。
+支持的参数类型为 `string`、`number`、`Boolean`、`color`、`angle` 和模板内部的变量、列表引用。扩展 `conditional` / `loop`、带正 `branchCount` 的 `command` 和多段 `text` 均可编译。`matrix`、`note`、`image` 等未支持的参数类型仍明确报错。label、button、separator 等纯 GUI 项略过。显式 opcode 调用也遵循这些规则，细节见[模板实现](./templates.md)。
 
 ## TurboWarp 运行时设置
 

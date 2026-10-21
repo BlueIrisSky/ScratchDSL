@@ -131,8 +131,8 @@ fn bound_body_json(body: &[BoundStatement]) -> Value {
         body.iter()
             .map(|statement| json!({
                 "invocation": statement.invocation, "span": statement.span,
-                "body": statement.body.as_ref().map(|body| bound_body_json(body)),
-                "otherwise": statement.otherwise.as_ref().map(|body| bound_body_json(body)),
+                "branches": statement.branches.iter()
+                    .map(|branch| bound_body_json(branch)).collect::<Vec<_>>(),
             }))
             .collect::<Vec<_>>()
     )
@@ -223,13 +223,14 @@ impl Emitter<'_> {
             if let Some(previous) = previous {
                 self.blocks[&previous]["next"] = json!(id);
             }
-            if let Some(body) = &statement.body {
-                let first = self.stack(body, &id)?;
-                self.blocks[&id]["inputs"]["SUBSTACK"] = json!([2, first]);
-            }
-            if let Some(body) = &statement.otherwise {
-                let first = self.stack(body, &id)?;
-                self.blocks[&id]["inputs"]["SUBSTACK2"] = json!([2, first]);
+            for (index, branch) in statement.branches.iter().enumerate() {
+                let first = self.stack(branch, &id)?;
+                let input = if index == 0 {
+                    "SUBSTACK".to_owned()
+                } else {
+                    format!("SUBSTACK{}", index + 1)
+                };
+                self.blocks[&id]["inputs"][&input] = json!([2, first]);
             }
             previous = Some(id);
         }
@@ -384,7 +385,7 @@ impl Emitter<'_> {
             }
         } else {
             match value {
-                Expr::Number(n) => Some(json!(number_text(*n))),
+                Expr::Number(n) => Some(json!(n.to_string())),
                 Expr::String(s) | Expr::Menu(s) => Some(json!(s)),
                 _ => None,
             }
@@ -500,14 +501,10 @@ impl Emitter<'_> {
 
 fn scalar_text(expression: &Expr) -> Option<String> {
     match expression {
-        Expr::Number(n) => Some(number_text(*n)),
+        Expr::Number(n) => Some(n.to_string()),
         Expr::String(s) | Expr::Menu(s) => Some(s.clone()),
         _ => None,
     }
-}
-
-fn number_text(number: f64) -> String {
-    number.to_string()
 }
 
 fn json_text(value: &Value) -> String {
@@ -520,7 +517,7 @@ fn json_text(value: &Value) -> String {
 
 fn scalar_primitive(expression: &Expr) -> Option<Value> {
     match expression {
-        Expr::Number(n) => Some(json!([4, number_text(*n)])),
+        Expr::Number(n) => Some(json!([4, n.to_string()])),
         Expr::String(s) | Expr::Menu(s) => Some(json!([10, s])),
         _ => None,
     }
@@ -546,7 +543,7 @@ mod tests {
         }
     }
     fn script(body: Vec<Statement>) -> (String, Vec<Statement>, Span) {
-        ("当绿旗被点击".into(), body, span())
+        ("start".into(), body, span())
     }
     fn procedure(header: &str, id: &str, body: Vec<Statement>) -> Procedure {
         Procedure {
@@ -575,6 +572,7 @@ mod tests {
         registry.templates.push(Template {
             opcode: opcode.into(),
             shape: Shape::Command,
+            branch_count: 0,
             namespace: None,
             extension_id: None,
             local_opcode: None,
@@ -620,14 +618,14 @@ mod tests {
         project.sprites.push(Target {
             name: "玩家".into(),
             scripts: vec![script(vec![
-                command("[将 $score 设为 (1 + 2)]"),
+                command("score = (1 + 2)"),
                 Statement::Control {
-                    header: "如果 <> 那么".into(),
-                    body: vec![command("[说 <false>]")],
-                    else_body: Some(vec![command("[等待 1 秒]")]),
+                    header: "if <>".into(),
+                    body: vec![command("说 (<false>)")],
+                    else_body: Some(vec![command("等待 (1) 秒")]),
                     span: span(),
                 },
-                command("[移动 10 步]"),
+                command("移动 (10) 步"),
             ])],
             ..Target::default()
         });
@@ -655,23 +653,21 @@ mod tests {
             procedure(
                 "甲",
                 "global-a",
-                vec![command("[将 $score 设为 $score]"), command("[乙]")],
+                vec![command("score = score"), command("乙")],
             ),
-            procedure("乙", "global-b", vec![command("[甲]")]),
+            procedure("乙", "global-b", vec![command("甲")]),
         ];
         let mut sprite = Target {
             name: "玩家".into(),
             ..Target::default()
         };
         sprite.variables.insert("score".into(), json!(2));
-        sprite.procedures.push(procedure(
-            "甲",
-            "private-a",
-            vec![command("[将 $score 设为 $score]")],
-        ));
+        sprite
+            .procedures
+            .push(procedure("甲", "private-a", vec![command("score = score")]));
         sprite
             .scripts
-            .push(script(vec![command("[甲]"), command("[乙]")]));
+            .push(script(vec![command("甲"), command("乙")]));
         project.sprites.push(sprite);
         let output = generate(&project, &Registry::new()).unwrap();
         assert!(opcode(&output, 0, "procedures_prototype").is_empty());
@@ -717,9 +713,9 @@ mod tests {
             "文字%s 值 @x 判断 <@yes> @warp",
             "p",
             vec![
-                command("[将 $value 设为 @x]"),
+                command("value = @x"),
                 Statement::Control {
-                    header: "如果 <@yes> 那么".into(),
+                    header: "if <@yes>".into(),
                     body: vec![],
                     else_body: None,
                     span: span(),
@@ -729,7 +725,7 @@ mod tests {
         project
             .stage
             .scripts
-            .push(script(vec![command("[文字%s 值 8 判断 <true>]")]));
+            .push(script(vec![command("文字%s 值 (8) 判断 <true>")]));
         let output = generate(&project, &Registry::new()).unwrap();
         let prototype = opcode(&output, 0, "procedures_prototype")[0].1;
         assert_eq!(prototype["shadow"], true);
@@ -760,12 +756,12 @@ mod tests {
         let mut project = Project::default();
         project
             .public_procedures
-            .push(procedure("移动动作", "p", vec![command("[移动 1 步]")]));
+            .push(procedure("移动动作", "p", vec![command("移动 (1) 步")]));
         assert!(generate(&project, &Registry::new()).is_ok());
         project
             .stage
             .scripts
-            .push(script(vec![command("[移动动作]")]));
+            .push(script(vec![command("移动动作")]));
         let error = generate(&project, &Registry::new())
             .unwrap_err()
             .to_string();
@@ -774,21 +770,21 @@ mod tests {
             "{error}"
         );
         project.stage.scripts.clear();
-        project.public_procedures[0].body = vec![command("[将 1 加入 $list:missing]")];
+        project.public_procedures[0].body = vec![command("将 (1) 加入 (missing)")];
         assert!(
             generate(&project, &Registry::new())
                 .unwrap_err()
                 .to_string()
                 .contains("未声明")
         );
-        project.public_procedures[0].body = vec![command("[将 $x 设为 @missing]")];
+        project.public_procedures[0].body = vec![command("x = @missing")];
         assert!(
             generate(&project, &Registry::new())
                 .unwrap_err()
                 .to_string()
                 .contains("参数")
         );
-        project.public_procedures[0].body = vec![command("[完全未知的积木]")];
+        project.public_procedures[0].body = vec![command("完全未知的积木")];
         assert!(generate(&project, &Registry::new()).is_err());
     }
 
@@ -820,10 +816,10 @@ mod tests {
         test_registry_template(&mut registry, "custom_dynamic", "动态 [MODE]", menu);
         let mut project = Project::default();
         project.stage.scripts.push(script(vec![
-            command("[字段 /'快速'/]"),
-            command("[输入 /'fast'/]"),
-            command("[输入 \"arbitrary\"]"),
-            command("[动态 42]"),
+            command("字段 '快速'"),
+            command("输入 ('fast')"),
+            command("输入 (\"arbitrary\")"),
+            command("动态 (42)"),
         ]));
         let output = generate(&project, &registry).unwrap();
         assert_eq!(
@@ -859,9 +855,9 @@ mod tests {
         project.sprites.push(Target {
             name: "玩家".into(),
             scripts: vec![script(vec![
-                command("[面向 45 方向]"),
-                command("[颜色 \"#AABBCC\"]"),
-                command("[说 12]"),
+                command("面向 (45) 方向"),
+                command("颜色 (\"#AABBCC\")"),
+                command("说 (12)"),
             ])],
             ..Target::default()
         });
@@ -886,7 +882,7 @@ mod tests {
         project
             .stage
             .scripts
-            .push(script(vec![command("[广播 \"消息\"]")]));
+            .push(script(vec![command("广播 (\"消息\")")]));
         project.sprites.push(Target {
             name: "玩家".into(),
             scripts: vec![("当收到广播 \"消息\"".into(), vec![], span())],

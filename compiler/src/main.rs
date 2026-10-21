@@ -88,12 +88,12 @@ fn run() -> Result<()> {
             let config =
                 sbdsl::config::discover(input.as_deref(), output.as_deref(), &env::current_dir()?)?;
             let compiled = sbdsl::build::compile(&config)?;
-            let targets = compiled.json["targets"].as_array().map_or(0, |a| a.len());
-            let blocks: usize = compiled.json["targets"]
-                .as_array()
+            let target_list = compiled.json["targets"].as_array();
+            let targets = target_list.map_or(0, Vec::len);
+            let blocks: usize = target_list
                 .into_iter()
                 .flatten()
-                .map(|t| t["blocks"].as_object().map_or(0, |m| m.len()))
+                .map(|t| t["blocks"].as_object().map_or(0, serde_json::Map::len))
                 .sum();
             if check {
                 println!("检查通过：{targets} 个目标，{blocks} 个积木");

@@ -2,11 +2,27 @@
 use lsp_types::Position;
 use std::path::{Path, PathBuf};
 
-pub fn position(source: &str, byte: usize) -> Position {
-    let mut end = byte.min(source.len());
-    while !source.is_char_boundary(end) {
-        end -= 1;
+pub fn byte_offset(source: &str, position: Position) -> Option<usize> {
+    let mut start = 0;
+    for _ in 0..position.line {
+        start += source[start..].find('\n')? + 1;
     }
+    let line = source[start..].split('\n').next()?.trim_end_matches('\r');
+    let mut units = 0;
+    for (offset, c) in line.char_indices() {
+        if units == position.character {
+            return Some(start + offset);
+        }
+        units += c.len_utf16() as u32;
+        if units > position.character {
+            return None;
+        }
+    }
+    (units == position.character).then_some(start + line.len())
+}
+
+pub fn position(source: &str, byte: usize) -> Position {
+    let end = source.floor_char_boundary(byte);
     let prefix = &source[..end];
     Position::new(
         prefix.bytes().filter(|&b| b == b'\n').count() as u32,
