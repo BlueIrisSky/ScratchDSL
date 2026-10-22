@@ -185,6 +185,12 @@ pub enum Item {
         body: Vec<Statement>,
         span: Span,
     },
+    /// A loose stack of blocks. It is emitted into the target without a hat and
+    /// never runs on its own.
+    Piece {
+        body: Vec<Statement>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -355,6 +361,7 @@ pub struct Target {
     pub lists: BTreeMap<String, Value>,
     pub procedures: Vec<Procedure>,
     pub scripts: Vec<(String, Vec<Statement>, Span)>,
+    pub pieces: Vec<(Vec<Statement>, Span)>,
 }
 
 #[derive(Debug, Clone, Default)]

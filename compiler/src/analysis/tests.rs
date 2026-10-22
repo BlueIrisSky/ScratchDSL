@@ -8,11 +8,11 @@ fn recovery_reports_syntax_import_and_binding_errors_across_the_project() {
     let main = directory.path().join("main.sbdsl");
     let broken = directory.path().join("broken.sbdsl");
     let healthy = directory.path().join("healthy.sbdsl");
-    let source = "broken = \nbrokenList = {1,}\nimport missing\nsprite \"玩家\":\n    init:\n        pass\n    start:\n        不存在的动作\n        删除 (missing) 的全部项目\n        说 (@missing)\n        后续动作\nimport broken\nimport healthy\n";
+    let source = "broken = \nbrokenList = {1,}\nimport missing\nsprite \"玩家\":\n    init:\n        pass\n    end\n    start:\n        不存在的动作\n        删除 (missing) 的全部项目\n        说 (@missing)\n        后续动作\n    end\nend\nimport broken\nimport healthy\n";
     let broken_source =
-        "alsoBroken = \nsprite \"玩家\" add:\n    start:\n        另一个不存在的动作\n";
+        "alsoBroken = \nsprite \"玩家\" add:\n    start:\n        另一个不存在的动作\n    end\nend\n";
     fs::write(&broken, broken_source).unwrap();
-    fs::write(&healthy, "def 后续动作:\n    等待 (0) 秒\n").unwrap();
+    fs::write(&healthy, "def 后续动作:\n    等待 (0) 秒\nend\n").unwrap();
     let overlays = BTreeMap::from([(main.clone(), source.into())]);
     let result = analyze_document(&main, &overlays, &mut AnalysisCache::default(), true);
     let main_errors: Vec<_> = result
@@ -129,11 +129,11 @@ fn unsaved_import_and_config_keep_the_project_entry() {
         (config, r#"{"entry":"main.sbdsl"}"#.into()),
         (
             main,
-            "sprite \"玩家\":\n    init:\n        pass\nimport parts\n".into(),
+            "sprite \"玩家\":\n    init:\n        pass\n    end\nend\nimport parts\n".into(),
         ),
         (
             part.clone(),
-            "start:\n    不存在的积木\nsprite \"玩家\" add:\n    start:\n        移动 (1) 步\n"
+            "start:\n    不存在的积木\nend\nsprite \"玩家\" add:\n    start:\n        移动 (1) 步\n    end\nend\n"
                 .into(),
         ),
     ]);
@@ -195,7 +195,7 @@ fn syntax_in_an_open_unimported_module_is_still_reported() {
             r#"{"entry":"main.sbdsl"}"#.into(),
         ),
         (main, "score = 0\n".into()),
-        (orphan.clone(), "start:\n    [说 \"unfinished".into()),
+        (orphan.clone(), "start:\n    [说 \"unfinished\nend".into()),
     ]);
     let result = analyze_document(&orphan, &overlays, &mut AnalysisCache::default(), true);
     assert_eq!(result.diagnostics.len(), 1);
@@ -206,7 +206,7 @@ fn syntax_in_an_open_unimported_module_is_still_reported() {
 fn diagnostics_check_targets_without_loading_or_decoding_assets() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("main.sbdsl");
-    let source = "sprite \"玩家\":\n    init:\n        \"costumes\":[{\"name\":\"missing\",\"path\":\"does-not-exist.svg\"}]\n    start:\n        移动 (1) 步\n";
+    let source = "sprite \"玩家\":\n    init:\n        \"costumes\":[{\"name\":\"missing\",\"path\":\"does-not-exist.svg\"}]\n    end\n    start:\n        移动 (1) 步\n    end\nend\n";
     let mut overlays = BTreeMap::from([(path.clone(), source.into())]);
     let mut cache = AnalysisCache::default();
     assert!(
@@ -214,7 +214,7 @@ fn diagnostics_check_targets_without_loading_or_decoding_assets() {
             .diagnostics
             .is_empty()
     );
-    overlays.insert(path.clone(), "start:\n    移动 (1) 步".into());
+    overlays.insert(path.clone(), "start:\n    移动 (1) 步\nend".into());
     let result = analyze_document(&path, &overlays, &mut cache, true);
     assert_eq!(result.diagnostics.len(), 1);
     assert!(result.diagnostics[0].message.contains("舞台不支持"));
@@ -228,7 +228,7 @@ fn diagnostics_check_targets_without_loading_or_decoding_assets() {
 fn shared_binding_keeps_public_lexical_scope_and_implicit_globals() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("main.sbdsl");
-    let source = "x = 3\ndef 公共动作:\n    x = 1\n    implicit = 2\nsprite \"玩家\":\n    init:\n        pass\n    x = 9\n    start:\n        公共动作\n";
+    let source = "x = 3\ndef 公共动作:\n    x = 1\n    implicit = 2\nend\nsprite \"玩家\":\n    init:\n        pass\n    end\n    x = 9\n    start:\n        公共动作\n    end\nend\n";
     let provider = OverlaySource::new(&BTreeMap::from([(path.clone(), source.into())]));
     let project = project::load_with_provider(&path, directory.path(), &provider).unwrap();
     let bound = bind::bind_project(&project, &Registry::new()).unwrap();
@@ -245,7 +245,7 @@ fn shared_binding_keeps_public_lexical_scope_and_implicit_globals() {
 fn public_target_restrictions_apply_only_when_instantiated() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("main.sbdsl");
-    let mut overlays = BTreeMap::from([(path.clone(), "def 动作:\n    移动 (1) 步\n".into())]);
+    let mut overlays = BTreeMap::from([(path.clone(), "def 动作:\n    移动 (1) 步\nend\n".into())]);
     let mut cache = AnalysisCache::default();
     assert!(
         analyze_document(&path, &overlays, &mut cache, true)
@@ -255,7 +255,7 @@ fn public_target_restrictions_apply_only_when_instantiated() {
     overlays
         .get_mut(&path)
         .unwrap()
-        .push_str("start:\n    动作\n");
+        .push_str("start:\n    动作\nend\n");
     let result = analyze_document(&path, &overlays, &mut cache, true);
     assert!(result.diagnostics[0].message.contains("舞台不支持"));
 }
@@ -272,7 +272,7 @@ fn extension_schema_cache_tracks_saved_content_and_caches_failures() {
             directory.path().join("sbdsl.buildsb"),
             r#"{"entry":"main.sbdsl","extensions":["自定义拓展.js"]}"#.into(),
         ),
-        (path.clone(), "start:\n    \"自定义拓展\".做".into()),
+        (path.clone(), "start:\n    \"自定义拓展\".做\nend".into()),
     ]);
     let mut cache = AnalysisCache::default();
     assert!(
@@ -324,7 +324,7 @@ fn extension_alias_overlay_refreshes_cached_namespaces_and_completion() {
         format!("entry: \"main.sbdsl\"\nextensions: [\"自定义拓展.js\" as \"{alias}\"]\n")
     };
     fs::write(&config, config_source("first")).unwrap();
-    let mut overlays = BTreeMap::from([(path.clone(), "start:\n    first.做".into())]);
+    let mut overlays = BTreeMap::from([(path.clone(), "start:\n    first.做\nend".into())]);
     let mut cache = AnalysisCache::default();
     let first = analyze_document(&path, &overlays, &mut cache, true);
     assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
@@ -369,7 +369,7 @@ fn extension_alias_overlay_refreshes_cached_namespaces_and_completion() {
     );
     assert_eq!(completions.len(), 1, "{completions:?}");
     assert_eq!(completions[0].label, "second.做");
-    overlays.insert(path.clone(), "start:\n    second.做".into());
+    overlays.insert(path.clone(), "start:\n    second.做\nend".into());
     assert!(
         analyze_document(&path, &overlays, &mut cache, true)
             .diagnostics
@@ -415,7 +415,7 @@ fn missing_path_identity_is_stable_when_saved() {
 fn untrusted_builtin_projects_still_report_semantics_and_import_errors() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("main.sbdsl");
-    let mut overlays = BTreeMap::from([(path.clone(), "start:\n    移动 (1) 步".into())]);
+    let mut overlays = BTreeMap::from([(path.clone(), "start:\n    移动 (1) 步\nend".into())]);
     let mut cache = AnalysisCache::default();
     let result = analyze_document(&path, &overlays, &mut cache, false);
     assert!(result.diagnostics[0].message.contains("舞台不支持"));

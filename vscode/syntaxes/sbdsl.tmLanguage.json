@@ -36,7 +36,7 @@
     },
     {
       "name": "keyword.control.sbdsl",
-      "match": "(?<![\\p{L}\\p{Nd}_$@])(?:stage|sprite|init|add|pass)\\b(?!:)"
+      "match": "(?<![\\p{L}\\p{Nd}_$@])(?:stage|sprite|init|piece|add|pass|end)\\b(?!:)"
     },
     {
       "include": "#control"
@@ -306,7 +306,7 @@
     "reporter": {
       "name": "meta.block.reporter.sbdsl",
       "begin": "\\(",
-      "end": "\\)|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
+      "end": "\\)|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|piece|var|list|global|def|start|if|elif|else|loop|while|end)\\b))",
       "beginCaptures": {
         "0": {
           "name": "punctuation.definition.reporter.begin.sbdsl"
@@ -344,7 +344,7 @@
     "boolean": {
       "name": "meta.block.boolean.sbdsl",
       "begin": "<(?!\\*)",
-      "end": ">(?!\\*)|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
+      "end": ">(?!\\*)|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|piece|var|list|global|def|start|if|elif|else|loop|while|end)\\b))",
       "beginCaptures": {
         "0": {
           "name": "punctuation.definition.boolean.begin.sbdsl"
@@ -381,7 +381,7 @@
     "list-initializer": {
       "name": "meta.sequence.list.sbdsl",
       "begin": "\\{",
-      "end": "\\}|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
+      "end": "\\}|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|piece|var|list|global|def|start|if|elif|else|loop|while|end)\\b))",
       "beginCaptures": {
         "0": {
           "name": "punctuation.definition.list.begin.sbdsl"
@@ -497,7 +497,7 @@
     },
     "control": {
       "name": "meta.control.sbdsl",
-      "begin": "((?:if|elif|else|loop|while)\\b)",
+      "begin": "((?:if|elif|else|loop|while|piece)\\b)",
       "end": "(?=:[ \\t]*(?:#.*)?$|$)",
       "beginCaptures": {
         "1": {
@@ -541,7 +541,7 @@
     "infix-reporter": {
       "name": "meta.block.reporter.sbdsl",
       "begin": "\\((?=[ \\t]*(?:[@\\\"\\'(0-9.+-]|global:|[\\p{L}_][\\p{L}\\p{Nd}_]*[ \\t]*(?:[+*/%\\-]|\\))|$))",
-      "end": "\\)|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
+      "end": "\\)|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|piece|var|list|global|def|start|if|elif|else|loop|while|end)\\b))",
       "beginCaptures": {
         "0": {
           "name": "punctuation.definition.reporter.begin.sbdsl"
@@ -605,7 +605,7 @@
               "name": "invalid.illegal.operator.sbdsl"
             }
           },
-          "end": "(?=\\))|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
+          "end": "(?=\\))|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|piece|var|list|global|def|start|if|elif|else|loop|while|end)\\b))",
           "patterns": [
             {
               "include": "#values"
@@ -626,7 +626,7 @@
               "name": "keyword.operator.sbdsl"
             }
           },
-          "end": "(?=\\))|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
+          "end": "(?=\\))|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|piece|var|list|global|def|start|if|elif|else|loop|while|end)\\b))",
           "patterns": [
             {
               "include": "#arithmetic-right"
@@ -709,7 +709,7 @@
               "name": "invalid.illegal.operator.sbdsl"
             }
           },
-          "end": "(?=[>]|[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
+          "end": "(?=[>]|[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|piece|var|list|global|def|start|if|elif|else|loop|while|end)\\b))",
           "patterns": [
             {
               "include": "#values"
@@ -733,7 +733,7 @@
               ]
             }
           },
-          "end": "(?=[>]|[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
+          "end": "(?=[>]|[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|piece|var|list|global|def|start|if|elif|else|loop|while|end)\\b))",
           "patterns": [
             {
               "include": "#values"
@@ -832,7 +832,7 @@
           ]
         }
       },
-      "end": ">(?!\\*)|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|var|list|global|def|start|if|elif|else|loop|while)\\b))",
+      "end": ">(?!\\*)|(?=[{}])|(?=^[ \\t]*(?:\\[|(?:stage|sprite|init|piece|var|list|global|def|start|if|elif|else|loop|while|end)\\b))",
       "endCaptures": {
         "0": {
           "name": "punctuation.definition.boolean.end.sbdsl"

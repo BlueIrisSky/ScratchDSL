@@ -272,6 +272,13 @@ impl<'a> Loader<'a> {
                     self.project.stage.scripts.push((header, body, span));
                 }
             }
+            Item::Piece { body, span } => {
+                if let Some(i) = sprite {
+                    self.project.sprites[i].pieces.push((body, span));
+                } else {
+                    self.project.stage.pieces.push((body, span));
+                }
+            }
         }
         Ok(())
     }

@@ -10,3 +10,5 @@ sprite "main":
                 path: "../assets/sbdsl.svg"
             }
         ]
+    end
+end

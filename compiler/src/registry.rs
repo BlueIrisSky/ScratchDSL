@@ -48,22 +48,6 @@ impl Registry {
         Resolution::new(self, visible).value(source)
     }
 
-    pub fn value_for_slot(&self, source: &str, slot: &Slot, visible: &[Template]) -> Result<Expr> {
-        Resolution::new(self, visible).value_for_slot(source, slot)
-    }
-
-    pub fn value_for_slot_typed(
-        &self,
-        source: &str,
-        slot: &Slot,
-        visible: &[Template],
-        data_types: &BTreeMap<(String, bool), bool>,
-    ) -> Result<Expr> {
-        let mut resolution = Resolution::new(self, visible);
-        resolution.data_types = Some(data_types);
-        resolution.value_for_slot(source, slot)
-    }
-
     pub(crate) fn builtin_template(&self, opcode: &str) -> Result<Template> {
         self.templates
             .iter()
@@ -1122,42 +1106,63 @@ pub fn procedure_template(header: &str, id: &str) -> Result<Template> {
     }
     let mut tokens = Vec::new();
     let mut names = BTreeSet::new();
+    let mut anonymous = 0;
     let mut p = 0;
     let mut lit = 0;
     while p < header.len() {
-        let boolean = header[p..].starts_with("<@");
-        if boolean || header[p..].starts_with('@') {
+        let boolean_at = header[p..].starts_with("<@");
+        let at = header[p..].starts_with('@');
+        let reporter = header[p..].starts_with('(');
+        let empty_boolean = header[p..].starts_with("<>");
+        let plain_boolean = header[p..].starts_with('<')
+            && header[p + 1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c == '_' || c.is_alphabetic());
+        if boolean_at || at || reporter || empty_boolean || plain_boolean {
             if p > lit {
                 tokens.push(Token::Literal(header[lit..p].into()));
             }
-            let end = if boolean {
-                scan_atom_candidates(header, p)?
+            let (end, name_start, name_end, arg_type) = if boolean_at {
+                let end = scan_atom_candidates(header, p)?
                     .into_iter()
                     .find(|end| *end > p + 2 && parse_name(&header[p + 2..*end - 1]).is_ok())
-                    .ok_or_else(|| Error::new("布尔参数声明需要 <@参数名>"))?
+                    .ok_or_else(|| Error::new("布尔参数声明需要 <@参数名>"))?;
+                (end, p + 2, end - 1, ArgType::Boolean)
+            } else if at {
+                let end = scan_atom(header, p)?;
+                (end, p + 1, end, ArgType::Any)
+            } else if reporter {
+                let end = scan_atom(header, p)?;
+                (end, p + 1, end - 1, ArgType::Any)
+            } else if empty_boolean {
+                (p + 2, p + 2, p + 2, ArgType::Boolean)
             } else {
-                scan_atom(header, p)?
+                let end = scan_atom_candidates(header, p)?
+                    .into_iter()
+                    .find(|end| *end > p + 2 && parse_name(header[p + 1..*end - 1].trim()).is_ok())
+                    .ok_or_else(|| Error::new("布尔参数声明需要 <参数名> 或 <@参数名>"))?;
+                (end, p + 1, end - 1, ArgType::Boolean)
             };
-            let name_source = if boolean {
-                &header[p + 2..end - 1]
+            let raw_name = header[name_start..name_end].trim();
+            let name = if raw_name.is_empty() {
+                loop {
+                    anonymous += 1;
+                    let candidate = format!("arg{anonymous}");
+                    if !names.contains(&candidate) {
+                        break candidate;
+                    }
+                }
             } else {
-                &header[p + 1..end]
+                parse_name(raw_name)?
             };
-            let name = parse_name(name_source)?;
             if name == "warp" {
                 return Err(Error::new("@warp 只能作为定义头末尾的单次属性"));
             }
             if !names.insert(name.clone()) {
                 return Err(Error::new(format!("重复过程参数 {name}")));
             }
-            tokens.push(Token::Slot(input(
-                &name,
-                if boolean {
-                    ArgType::Boolean
-                } else {
-                    ArgType::Any
-                },
-            )));
+            tokens.push(Token::Slot(input(&name, arg_type)));
             p = end;
             lit = p;
         } else {
@@ -1328,6 +1333,46 @@ mod tests {
                 .is_ok()
         );
     }
+    #[test]
+    fn procedure_headers_accept_parenthesized_and_plain_boolean_slots() {
+        let template = procedure_template("移动 (steps) 判断 <ready>", "typed").unwrap();
+        let slots: Vec<_> = template
+            .slots()
+            .map(|slot| (slot.name.as_str(), slot.arg_type))
+            .collect();
+        assert_eq!(
+            slots,
+            [("steps", ArgType::Any), ("ready", ArgType::Boolean)]
+        );
+        assert!(
+            Registry::new()
+                .parse(
+                    "移动 (10) 判断 <true>",
+                    Shape::Command,
+                    std::slice::from_ref(&template),
+                )
+                .is_ok()
+        );
+
+        // The specification uses empty () and <> placeholders in its compact
+        // definition example. Give those slots stable, positional names.
+        let anonymous = procedure_template("xxx()<>", "anonymous").unwrap();
+        let slots: Vec<_> = anonymous
+            .slots()
+            .map(|slot| (slot.name.as_str(), slot.arg_type))
+            .collect();
+        assert_eq!(slots, [("arg1", ArgType::Any), ("arg2", ArgType::Boolean)]);
+        assert!(
+            Registry::new()
+                .parse(
+                    "xxx(1)<true>",
+                    Shape::Command,
+                    std::slice::from_ref(&anonymous),
+                )
+                .is_ok()
+        );
+    }
+
     #[test]
     fn menus_map_labels_and_reject_invalid_fields() {
         let r = Registry::new();

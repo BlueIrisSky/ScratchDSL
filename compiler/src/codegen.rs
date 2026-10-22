@@ -45,10 +45,14 @@ pub(crate) fn generate_bound(analysis: &BoundProject) -> Result<GeneratedProject
             calls: Vec::new(),
         };
         for (script_index, script) in scripts[index].iter().enumerate() {
-            let hat = emitter.invocation(&script.hat, None, &script.span)?;
-            emitter.top_level(&hat, script_index);
-            let first = emitter.stack(&script.body, &hat)?;
-            emitter.blocks[&hat]["next"] = json!(first);
+            if let Some(hat) = &script.hat {
+                let hat = emitter.invocation(hat, None, &script.span)?;
+                emitter.top_level(&hat, script_index);
+                let first = emitter.stack(&script.body, Some(&hat))?;
+                emitter.blocks[&hat]["next"] = json!(first);
+            } else if let Some(first) = emitter.stack(&script.body, None)? {
+                emitter.top_level(&first, script_index);
+            }
         }
         let instance_ids: Vec<String> = emitter.instances.keys().cloned().collect();
         for (offset, id) in instance_ids.iter().enumerate() {
@@ -208,13 +212,13 @@ impl Emitter<'_> {
         self.blocks[id]["y"] = json!(40 + (index / 4) * 250);
     }
 
-    fn stack(&mut self, body: &[BoundStatement], parent: &str) -> Result<Option<String>> {
+    fn stack(&mut self, body: &[BoundStatement], parent: Option<&str>) -> Result<Option<String>> {
         let mut first = None;
         let mut previous: Option<String> = None;
         for statement in body {
             let id = self.invocation(
                 &statement.invocation,
-                Some(previous.as_deref().unwrap_or(parent)),
+                previous.as_deref().or(parent),
                 &statement.span,
             )?;
             if first.is_none() {
@@ -224,7 +228,7 @@ impl Emitter<'_> {
                 self.blocks[&previous]["next"] = json!(id);
             }
             for (index, branch) in statement.branches.iter().enumerate() {
-                let first = self.stack(branch, &id)?;
+                let first = self.stack(branch, Some(&id))?;
                 let input = if index == 0 {
                     "SUBSTACK".to_owned()
                 } else {
@@ -493,7 +497,7 @@ impl Emitter<'_> {
             self.blocks[&argument]["fields"]["VALUE"] = json!([slot.name, null]);
             self.blocks[&prototype]["inputs"][argument_id] = json!([1, argument]);
         }
-        let first = self.stack(&procedure.body, &definition)?;
+        let first = self.stack(&procedure.body, Some(&definition))?;
         self.blocks[&definition]["next"] = json!(first);
         Ok(())
     }
@@ -610,6 +614,21 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), blocks.len(), "orphan blocks");
+    }
+
+    #[test]
+    fn pieces_emit_loose_top_level_stacks_without_a_hat() {
+        let mut project = Project::default();
+        project
+            .stage
+            .pieces
+            .push((vec![command("等待 (1) 秒")], span()));
+        let output = generate(&project, &Registry::new()).unwrap();
+        let wait = opcode(&output, 0, "control_wait")[0].1;
+        assert_eq!(wait["topLevel"], true);
+        assert!(wait["parent"].is_null());
+        assert!(wait["next"].is_null());
+        assert_graph(&output, 0);
     }
 
     #[test]

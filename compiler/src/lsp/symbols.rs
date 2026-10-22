@@ -465,8 +465,8 @@ fn continuation_lines(source: &str) -> BTreeSet<usize> {
                 let next = source[position..].split('\n').next().unwrap_or("").trim();
                 let recovery = crate::parser::assignment_parts(next).is_some()
                     || [
-                        "var", "list", "global", "stage", "sprite", "init", "def", "import",
-                        "start", "if", "elif", "else", "loop", "while",
+                        "var", "list", "global", "stage", "sprite", "init", "piece", "def",
+                        "import", "start", "if", "elif", "else", "loop", "while", "end",
                     ]
                     .iter()
                     .any(|word| {

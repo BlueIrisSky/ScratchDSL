@@ -175,7 +175,8 @@ fn is_file_diagnostic(message: &Value, path: &std::path::Path) -> bool {
                 sbdsl::analysis::normalize_path(&actual) == sbdsl::analysis::normalize_path(path)
             })
 }
-const VALID: &str = "sprite \"玩家😀\":\n    init:\n        pass\n    start:\n        移动 (10) 步";
+const VALID: &str =
+    "sprite \"玩家😀\":\n    init:\n        pass\n    start:\n        移动 (10) 步\n    end";
 
 #[test]
 fn stdio_diagnostics_completion_versions_and_shutdown() {
@@ -279,7 +280,7 @@ fn project_ast_diagnostics_include_multiple_errors_and_unopened_imports() {
     let main = directory.path().join("main.sbdsl");
     let module = directory.path().join("library.sbdsl");
     let (main_uri, module_uri) = (uri(&main), uri(&module));
-    let source = "a = \nb = {1,}\nsprite \"玩家😀\":\n    init:\n        pass\n    start:\n        不存在的动作\nimport library\n";
+    let source = "a = \nb = {1,}\nsprite \"玩家😀\":\n    init:\n        pass\n    start:\n        不存在的动作\n    end\nimport library\n";
     std::fs::write(&main, source).unwrap();
     std::fs::write(&module, "a = \nb = {1,}\n").unwrap();
     let mut client = Client::start(false);
@@ -479,7 +480,7 @@ fn unsaved_extension_alias_updates_diagnostics_and_completion() {
     let main = directory.path().join("main.sbdsl");
     let config = directory.path().join("sbdsl.buildsb");
     let config_source = "entry: \"main.sbdsl\"\nextensions: [\"自定义拓展.js\" as \"first\"]\n";
-    let source = "start:\n    first.做\n";
+    let source = "start:\n    first.做\nend\n";
     std::fs::write(&main, source).unwrap();
     std::fs::write(&config, config_source).unwrap();
     std::fs::write(
@@ -493,12 +494,12 @@ fn unsaved_extension_alias_updates_diagnostics_and_completion() {
     client.open(&main_uri, "sbdsl", source);
     client.diagnostics(&main_uri, 1, false);
     let complete = |client: &mut Client, source: &str| {
-        let cursor = source.trim_end().len();
+        let line = source.lines().nth(1).unwrap_or("");
         client.request(
             "textDocument/completion",
             json!({
                 "textDocument":{"uri":main_uri},
-                "position":{"line":1,"character":source[..cursor].rsplit('\n').next().unwrap().encode_utf16().count()}
+                "position":{"line":1,"character":line.encode_utf16().count()}
             }),
         )["items"]
             .as_array()
@@ -545,7 +546,7 @@ fn unsaved_extension_alias_updates_diagnostics_and_completion() {
 fn extension_controls_complete_all_suites_and_publish_branch_diagnostics() {
     let directory = tempfile::tempdir().unwrap();
     let main = directory.path().join("main.sbdsl");
-    let valid = "start:\n    flow.如果 <true> 否则 (1):\n        pass\n    else:\n        pass\n";
+    let valid = "start:\n    flow.如果 <true> 否则 (1):\n        pass\n    else:\n        pass\n    end\nend\n";
     std::fs::write(&main, valid).unwrap();
     std::fs::write(
         directory.path().join("sbdsl.buildsb"),
@@ -585,10 +586,10 @@ fn extension_controls_complete_all_suites_and_publish_branch_diagnostics() {
 
     let mut version = 3;
     for invalid in [
-        "start:\n    flow.如果 <true> 否则 (1):\n        pass\n",
-        "start:\n    flow.如果 <true> 否则 (1):\n        pass\n    else:\n        pass\n    else:\n        pass\n",
-        "start:\n    flow.执行 (1) 次\n",
-        "start:\n    flow.如果 <true> 否则 (1):\n        pass\n    else:\n        删除 (missing) 的全部项目\n",
+        "start:\n    flow.如果 <true> 否则 (1):\n        pass\n    end\nend\n",
+        "start:\n    flow.如果 <true> 否则 (1):\n        pass\n    else:\n        pass\n    else:\n        pass\n    end\nend\n",
+        "start:\n    flow.执行 (1) 次\nend\n",
+        "start:\n    flow.如果 <true> 否则 (1):\n        pass\n    else:\n        删除 (missing) 的全部项目\n    end\nend\n",
     ] {
         client.change(&main_uri, version, invalid);
         let diagnostics = client.diagnostics(&main_uri, version, true);
@@ -821,7 +822,7 @@ fn assignment_completion_and_diagnostics_use_script_scope_and_utf16_targets() {
     let main = directory.path().join("赋值😀.sbdsl");
     let source = |body: &str| {
         format!(
-            "score = 1\nlogs = {{}}\nsprite \"玩家😀\":\n    init:\n        pass\n    score = 2\n    特殊分数 = 3\n    def 更新 @steps:\n        {body}\nsprite \"其他\":\n    init:\n        pass\n    hidden = 4"
+            "score = 1\nlogs = {{}}\nsprite \"玩家😀\":\n    init:\n        pass\n    score = 2\n    特殊分数 = 3\n    def 更新 @steps:\n        {body}\n    end\nsprite \"其他\":\n    init:\n        pass\n    hidden = 4"
         )
     };
     let initial = source("score += @steps * 2");
@@ -887,7 +888,7 @@ fn assignment_completion_and_diagnostics_use_script_scope_and_utf16_targets() {
 fn data_name_conflicts_and_scalar_list_misuse_publish_and_clear_diagnostics() {
     let directory = tempfile::tempdir().unwrap();
     let main = directory.path().join("data_types.sbdsl");
-    let valid = "score = 1\nlogs = {}\nstart:\n    score = 2\n    将 (score) 加入 (logs)";
+    let valid = "score = 1\nlogs = {}\nstart:\n    score = 2\n    将 (score) 加入 (logs)\nend";
     std::fs::write(&main, valid).unwrap();
     let main_uri = uri(&main);
     let mut client = Client::start(false);
@@ -895,14 +896,14 @@ fn data_name_conflicts_and_scalar_list_misuse_publish_and_clear_diagnostics() {
     client.diagnostics(&main_uri, 1, false);
     let mut version = 2;
     for invalid in [
-        "score = 1\nscore = {}\nstart:\n    pass",
-        "score = 1\nlogs = {}\nstart:\n    logs = 1",
-        "score = 1\nlogs = {}\nstart:\n    score = logs",
-        "score = 1\nlogs = {}\nstart:\n    将 (\"x\") 加入 (score)",
-        "score = 1\nlogs = {}\nstart:\n    说 (logs)",
-        "score = 1\nsprite \"玩家\":\n    init:\n        pass\n    score = {}\n    start:\n        pass",
-        "var \"bad name\" = 1\nstart:\n    pass",
-        "list \"bad list\" = {}\nstart:\n    pass",
+        "score = 1\nscore = {}\nstart:\n    pass\nend",
+        "score = 1\nlogs = {}\nstart:\n    logs = 1\nend",
+        "score = 1\nlogs = {}\nstart:\n    score = logs\nend",
+        "score = 1\nlogs = {}\nstart:\n    将 (\"x\") 加入 (score)\nend",
+        "score = 1\nlogs = {}\nstart:\n    说 (logs)\nend",
+        "score = 1\nsprite \"玩家\":\n    init:\n        pass\n    score = {}\n    start:\n        pass\n    end",
+        "var \"bad name\" = 1\nstart:\n    pass\nend",
+        "list \"bad list\" = {}\nstart:\n    pass\nend",
     ] {
         client.change(&main_uri, version, invalid);
         let diagnostics = client.diagnostics(&main_uri, version, true);
@@ -927,7 +928,7 @@ fn first_script_assignments_infer_completion_kinds_and_invalid_changes_clear() {
     let directory = tempfile::tempdir().unwrap();
     let main = directory.path().join("inferred_data.sbdsl");
     let source =
-        |body: &str| format!("start:\n    score = 1\n    logs = {{\"first\"}}\n    {body}");
+        |body: &str| format!("start:\n    score = 1\n    logs = {{\"first\"}}\n    {body}\nend");
     let valid = source("logs = {}\n    将(score)加入(logs)");
     std::fs::write(&main, &valid).unwrap();
     let main_uri = uri(&main);

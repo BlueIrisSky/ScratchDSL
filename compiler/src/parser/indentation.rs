@@ -256,27 +256,30 @@ impl IndentedParser<'_> {
         }
     }
 
-    fn child_indent(&mut self, unit: &Unit) -> Option<usize> {
-        if !unit.body {
-            self.error(unit.start, "expected : followed by an indented block");
-            self.skip_children(unit.indent);
-            return None;
-        }
+    fn body_indent(&mut self, unit: &Unit) -> Option<usize> {
         match self.peek() {
             Some((_, indent)) if indent > unit.indent => Some(indent),
-            _ => {
-                if !self.errors.iter().any(|error| {
-                    error.0 == "unterminated block comment"
-                        && error.span().is_some_and(|span| span.start >= unit.end)
-                }) {
-                    self.error(
-                        unit.end,
-                        "expected an indented block; use pass for an empty block",
-                    );
-                }
-                None
+            _ => None,
+        }
+    }
+
+    /// Collect declaration members until their matching `end`. Unlike a
+    /// statement body, a member list may contain data, procedures and scripts.
+    fn items_until_end(&mut self, context: Context, indent: usize, header: &Unit) -> Vec<Item> {
+        let mut items = Vec::new();
+        while let Some(unit) = self.next_at(indent) {
+            if unit.header == "end" && !unit.body {
+                return items;
+            }
+            if let Some(item) = self.item(&unit, context) {
+                items.push(item);
             }
         }
+        self.error(
+            header.start,
+            "missing end; close this block with end at the same indentation",
+        );
+        items
     }
 
     fn skip_children(&mut self, parent_indent: usize) {
@@ -286,6 +289,45 @@ impl IndentedParser<'_> {
             }
             self.pos = physical_line_end(&self.source, start);
         }
+    }
+
+    fn line_text(&self, start: usize) -> &str {
+        self.source[start..physical_line_end(&self.source, start)].trim()
+    }
+
+    /// A block body is optional when the matching `end` follows immediately.
+    fn block_body(&mut self, unit: &Unit) -> Vec<Statement> {
+        match self.peek() {
+            Some((_, indent)) if indent > unit.indent => self.statements(indent),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Consume the mandatory `end` for an event, definition, piece or C-block.
+    fn expect_end(&mut self, unit: &Unit) {
+        if let Some((start, indent)) = self.peek()
+            && indent == unit.indent
+            && self.line_text(start) == "end"
+        {
+            self.pos = physical_line_end(&self.source, start);
+            return;
+        }
+        self.error(
+            unit.start,
+            "missing end; close this block with end at the same indentation",
+        );
+    }
+
+    fn reject_stray_end(&mut self, unit: &Unit) -> bool {
+        if keyword_rest(&unit.header, "end").is_none() {
+            return false;
+        }
+        if unit.header == "end" && !unit.body {
+            self.reject(unit, "unexpected end; no enclosing block to close");
+        } else {
+            self.reject(unit, "end must be written alone on its own line");
+        }
+        true
     }
 
     fn reject(&mut self, unit: &Unit, message: impl Into<String>) {
@@ -328,6 +370,9 @@ impl IndentedParser<'_> {
         let header = &unit.header;
         let span = self.span(unit);
         if header == "pass" && !unit.body {
+            return None;
+        }
+        if self.reject_stray_end(unit) {
             return None;
         }
         if obsolete_header(header) {
@@ -382,9 +427,13 @@ impl IndentedParser<'_> {
             } else if !rest.is_empty() {
                 self.reject(unit, "expected stage:");
             } else {
-                let children = self
-                    .child_indent(unit)
-                    .map_or_else(Vec::new, |indent| self.items(Context::Stage, indent));
+                let children = match self.body_indent(unit) {
+                    Some(indent) => self.items_until_end(Context::Stage, indent, unit),
+                    None => {
+                        self.expect_end(unit);
+                        Vec::new()
+                    }
+                };
                 return Some(Item::Stage(children));
             }
         } else if let Some(rest) = keyword_rest(header, "sprite") {
@@ -403,10 +452,14 @@ impl IndentedParser<'_> {
                     }
                     Ok((name, tail)) => {
                         let add = tail == "add";
-                        let (init, children) = if let Some(indent) = self.child_indent(unit) {
+                        let (init, children) = if let Some(indent) = self.body_indent(unit) {
                             let init = if add { None } else { self.sprite_init(indent) };
-                            (init, self.items(Context::Sprite, indent))
+                            (init, self.items_until_end(Context::Sprite, indent, unit))
                         } else {
+                            if !add {
+                                self.error(unit.start, "a new sprite must begin with init:");
+                            }
+                            self.expect_end(unit);
                             (None, vec![])
                         };
                         return Some(Item::Sprite {
@@ -426,14 +479,23 @@ impl IndentedParser<'_> {
                     "procedure definition needs a nonempty header and a body",
                 );
             } else {
-                let body = self
-                    .child_indent(unit)
-                    .map_or_else(Vec::new, |indent| self.statements(indent));
+                let body = self.block_body(unit);
+                self.expect_end(unit);
                 return Some(Item::Procedure {
                     header: rest.into(),
                     body,
                     span,
                 });
+            }
+        } else if keyword_rest(header, "piece").is_some() {
+            if header != "piece" {
+                self.reject(unit, "expected piece: with no additional text");
+            } else if !unit.body {
+                self.reject(unit, "piece must be written as piece: followed by end");
+            } else {
+                let body = self.block_body(unit);
+                self.expect_end(unit);
+                return Some(Item::Piece { body, span });
             }
         } else if keyword_rest(header, "init").is_some() {
             self.reject(unit, "init must appear exactly once as the first item of a new sprite; it is forbidden in add and other bodies");
@@ -447,9 +509,8 @@ impl IndentedParser<'_> {
         } else if header.is_empty() {
             self.reject(unit, "event body needs a hat header");
         } else {
-            let body = self
-                .child_indent(unit)
-                .map_or_else(Vec::new, |indent| self.statements(indent));
+            let body = self.block_body(unit);
+            self.expect_end(unit);
             return Some(Item::Script {
                 header: header.clone(),
                 body,
@@ -473,32 +534,37 @@ impl IndentedParser<'_> {
             self.reject(&unit, "expected init: followed by indented data fields");
             return None;
         }
-        self.child_indent(&unit)?;
+        let has_body = self.body_indent(&unit).is_some();
         let object_start = self.pos;
-        self.skip_children(indent);
+        if has_body {
+            self.skip_children(indent);
+        }
         let object_end = self.pos;
         let text = self.source[object_start..object_end].trim();
-        if text.starts_with('{') {
-            self.error(
-                object_start,
-                "init uses indented fields without outer braces; use pass for defaults",
-            );
-            return None;
-        }
-        let init = if text == "pass" {
-            Ok(SpriteInit::default())
-        } else {
-            crate::notation::parse_region::<SpriteInit>(
-                self.path,
-                self.original,
-                object_start..object_end,
-            )
-        };
-        match init.and_then(|init| {
+        let init = (|| -> crate::Result<SpriteInit> {
+            if text.starts_with('{') {
+                return Err(Error::new(
+                    "init uses indented fields without outer braces; use pass for defaults",
+                )
+                .at(&self.span_at(object_start)));
+            }
+            if !has_body || text == "pass" {
+                Ok(SpriteInit::default())
+            } else {
+                crate::notation::parse_region::<SpriteInit>(
+                    self.path,
+                    self.original,
+                    object_start..object_end,
+                )
+            }
+        })();
+        let result = init.and_then(|init| {
             init.validate()
                 .map_err(|error| error.at(&self.span(&unit)))?;
             Ok(init)
-        }) {
+        });
+        self.expect_end(&unit);
+        match result {
             Ok(init) => Some(init),
             Err(error) => {
                 self.errors.push(error);
@@ -520,6 +586,16 @@ impl IndentedParser<'_> {
     fn statement(&mut self, unit: &Unit) -> Option<Statement> {
         let header = &unit.header;
         if header == "pass" && !unit.body {
+            return None;
+        }
+        if self.reject_stray_end(unit) {
+            return None;
+        }
+        if keyword_rest(header, "piece").is_some() {
+            self.reject(
+                unit,
+                "piece cannot be nested inside a script, piece, or control-flow body",
+            );
             return None;
         }
         if let Some(assignment) = assignment_parts(header) {
@@ -592,9 +668,7 @@ impl IndentedParser<'_> {
     }
 
     fn extension_control(&mut self, unit: &Unit) -> Statement {
-        let first = self
-            .child_indent(unit)
-            .map_or_else(Vec::new, |indent| self.statements(indent));
+        let first = self.block_body(unit);
         let mut branches = vec![first];
         while let Some((start, indent)) = self.peek() {
             if indent != unit.indent || !starts_keyword(&self.source[start..], "else") {
@@ -610,11 +684,9 @@ impl IndentedParser<'_> {
                 );
                 continue;
             }
-            branches.push(
-                self.child_indent(&otherwise)
-                    .map_or_else(Vec::new, |indent| self.statements(indent)),
-            );
+            branches.push(self.block_body(&otherwise));
         }
+        self.expect_end(unit);
         Statement::ExtensionControl {
             header: unit.header.clone(),
             branches,
@@ -623,35 +695,67 @@ impl IndentedParser<'_> {
     }
 
     fn control(&mut self, unit: &Unit) -> Statement {
-        let body = self
-            .child_indent(unit)
-            .map_or_else(Vec::new, |indent| self.statements(indent));
-        let mut else_body = None;
-        if if_header(&unit.header)
-            && let Some((start, indent)) = self.peek()
-            && indent == unit.indent
-            && ["elif", "else"]
-                .iter()
-                .any(|key| starts_keyword(&self.source[start..], key))
-            && let Some(otherwise) = self.read_unit(indent)
-        {
-            if keyword_rest(&otherwise.header, "elif").is_some() {
-                else_body = Some(vec![self.control(&otherwise)]);
-            } else if otherwise.header == "else" {
-                else_body = Some(
-                    self.child_indent(&otherwise)
-                        .map_or_else(Vec::new, |indent| self.statements(indent)),
-                );
-            } else {
-                self.reject(&otherwise, "expected else: followed by an indented block");
-            }
+        if if_header(&unit.header) {
+            return self.if_control(unit);
         }
+        let body = self.block_body(unit);
+        self.expect_end(unit);
         Statement::Control {
             header: unit.header.clone(),
             body,
-            else_body,
+            else_body: None,
             span: self.span(unit),
         }
+    }
+
+    /// Parse the complete if/elif/else chain before consuming its single end.
+    fn if_control(&mut self, unit: &Unit) -> Statement {
+        let mut branches = vec![(unit.header.clone(), self.block_body(unit), self.span(unit))];
+        let mut else_body = None;
+        while let Some((start, indent)) = self.peek() {
+            if indent != unit.indent {
+                break;
+            }
+            let line = self.line_text(start);
+            if !starts_keyword(line, "elif") && !starts_keyword(line, "else") {
+                break;
+            }
+            let Some(otherwise) = self.read_unit(indent) else {
+                continue;
+            };
+            if keyword_rest(&otherwise.header, "elif").is_some() {
+                if else_body.is_some() {
+                    self.reject(&otherwise, "elif cannot follow else");
+                    continue;
+                }
+                let body = self.block_body(&otherwise);
+                branches.push((otherwise.header.clone(), body, self.span(&otherwise)));
+            } else if otherwise.header == "else" {
+                if else_body.is_some() {
+                    self.reject(&otherwise, "duplicate else");
+                    continue;
+                }
+                else_body = Some(self.block_body(&otherwise));
+            } else {
+                self.reject(
+                    &otherwise,
+                    "else must be written as else: with no condition",
+                );
+            }
+        }
+        self.expect_end(unit);
+        let mut chain = else_body;
+        for (header, body, span) in branches.into_iter().rev() {
+            chain = Some(vec![Statement::Control {
+                header,
+                body,
+                else_body: chain,
+                span,
+            }]);
+        }
+        chain
+            .and_then(|mut nodes| nodes.pop())
+            .expect("if chain has at least one node")
     }
 }
 
@@ -665,7 +769,7 @@ mod tests {
 
     #[test]
     fn python_suites_declarations_init_and_elif_keep_source_locations() {
-        let source = "values = {1, \"二\"}\nsprite \"玩家\":\n    init:\n        x: -10\n        costumes: [{name: \"猫\", path: \"a\\u002fb.svg\"}]\n    global:score = 0\n    def 检查 @n:\n        if <@n < 0>:\n            说 (\"负\")\n        elif <@n = 0>:\n            pass\n        elif <@n > 1>:\n            说 (\"大\")\n        else:\n            说 (\"一\")\n    start:\n        loop 2:\n            检查 (1)\n";
+        let source = "values = {1, \"二\"}\nsprite \"玩家\":\n    init:\n        x: -10\n        costumes: [{name: \"猫\", path: \"a\\u002fb.svg\"}]\n    end\n    global:score = 0\n    def 检查 @n:\n        if <@n < 0>:\n            说 (\"负\")\n        elif <@n = 0>:\n            pass\n        elif <@n > 1>:\n            说 (\"大\")\n        else:\n            说 (\"一\")\n        end\n    end\n    start:\n        loop 2:\n            检查 (1)\n        end\n    end\nend\n";
         let items = parse_text(source).unwrap();
         assert!(
             matches!(&items[0], Item::Data { list: true, value, .. } if value.as_array().unwrap().len() == 2)
@@ -718,7 +822,7 @@ mod tests {
 
     #[test]
     fn indentation_recovery_retains_siblings_after_bad_tokens_and_init() {
-        let source = "sprite \"玩家\":\n    init:\n        x: 1\n        x: 2\n    hp = 100\n    start:\n        说(\"broken\n        等待 (1) 秒\n        if <>:\n            var illegal = 1\n            说 (\"ok\")\n        else:\n            说 (\"else\")\noutside = 2\n";
+        let source = "sprite \"玩家\":\n    init:\n        x: 1\n        x: 2\n    end\n    hp = 100\n    start:\n        说(\"broken\n        等待 (1) 秒\n        if <>:\n            var illegal = 1\n            说 (\"ok\")\n        else:\n            说 (\"else\")\n        end\n    end\nend\noutside = 2\n";
         let report = parse_recovering(Path::new("python.sbdsl"), source);
         assert_eq!(report.errors.len(), 3, "{:?}", report.errors);
         let Item::Sprite {
@@ -754,15 +858,20 @@ mod tests {
             assert!(parse_text(source).is_err(), "{source}");
         }
         assert!(
-            parse_text("sprite \"a\":\n    init:\n        pass\n    start:\n        pass\n")
+            parse_text(
+                "sprite \"a\":\n    init:\n        pass\n    end\n    start:\n        pass\n    end\nend\n"
+            )
+            .is_ok()
+        );
+        assert!(
+            parse_text("start:\r\n\tif <>:\r\n\t\tpass\r\n\telse:\r\n\t\tpass\r\n\tend\r\nend\r\n")
                 .is_ok()
         );
-        assert!(parse_text("start:\r\n\tif <>:\r\n\t\tpass\r\n\telse:\r\n\t\tpass\r\n").is_ok());
     }
 
     #[test]
     fn multiline_commands_lists_comments_and_all_editing_prefixes_terminate() {
-        let source = "名字 = {\n    1,\n    \"二\"\n}\nsprite \"猫😀\": # hello\n    init:\n        pass\n    start:\n        说 (1 + 2)\n        # comment\n        if <>:\n            说 'a#b'\n        else:\n            pass\n";
+        let source = "名字 = {\n    1,\n    \"二\"\n}\nsprite \"猫😀\": # hello\n    init:\n        pass\n    end\n    start:\n        说 (1 + 2)\n        # comment\n        if <>:\n            说 'a#b'\n        else:\n            pass\n        end\n    end\nend\n";
         assert!(parse_text(source).is_ok());
         for (end, _) in source
             .char_indices()
@@ -780,7 +889,7 @@ mod tests {
     fn bare_data_files_and_inline_comments_do_not_change_indentation() {
         let items = parse_text("score = 0\nnames = {1, \"two\"}\n").unwrap();
         assert_eq!(items.len(), 2);
-        let source = "# inline 中文 # sprite \"a\":\n    # comment # init:\n        pass\n    # comment # start:\n        # comment # 说 (\"ok\")\n";
+        let source = "# inline 中文 # sprite \"a\":\n    # comment # init:\n        pass\n    end\n    # comment # start:\n        # comment # 说 (\"ok\")\n    end\nend\n";
         let items = parse_text(source).unwrap();
         let Item::Sprite { items, .. } = &items[0] else {
             panic!()
@@ -793,6 +902,52 @@ mod tests {
         };
         assert_eq!(span.line, 5);
         assert_eq!(&source[span.start..span.end], "说 (\"ok\")");
+    }
+
+    #[test]
+    fn end_terminates_events_definitions_pieces_and_control_flow() {
+        let source = r#"piece:
+    说("loose")
+    if <true>:
+        说("inside")
+    end
+end
+sprite "玩家":
+    init:
+        pass
+    end
+    def 动作 (steps)<ready>:
+        if <@ready>:
+            等待 (@steps) 秒
+        end
+    end
+    start:
+        动作 (1)<true>
+    end
+end
+"#;
+        let items = parse_text(source).unwrap();
+        assert!(matches!(&items[0], Item::Piece { .. }));
+        let Item::Sprite { items, .. } = &items[1] else {
+            panic!()
+        };
+        assert!(matches!(&items[0], Item::Procedure { .. }));
+        assert!(matches!(&items[1], Item::Script { .. }));
+        assert!(
+            parse_recovering(Path::new("python.sbdsl"), source)
+                .errors
+                .is_empty()
+        );
+
+        for invalid in [
+            "start:\n    说 (1)\n",
+            "start:\n    if <>:\n        pass\n",
+            "piece:\n    piece:\n    end\nend\n",
+            "piece:\n    start:\n        pass\n    end\nend\n",
+            "end\n",
+        ] {
+            assert!(parse_text(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -823,7 +978,7 @@ mod tests {
 
     #[test]
     fn loop_and_while_headers_remain_source_exact() {
-        let source = "start:\n    loop 3:\n        while <x < 5>:\n            x += 1\n    while true:\n        pass\n";
+        let source = "start:\n    loop 3:\n        while <x < 5>:\n            x += 1\n        end\n    end\n    while true:\n        pass\n    end\nend\n";
         let items = parse_text(source).unwrap();
         let Item::Script { body, .. } = &items[0] else {
             panic!()
@@ -850,14 +1005,18 @@ mod tests {
         score = 1
         if <score > 0>:
             说 (score)
+        end
     else:
         "自定义 扩展"::"loop"((2)):
             score += 1
+        end
     else:
         pass
     else:
         说 ("fourth")
+    end
     说 ("after")
+end
 "#;
         let items = parse_text(source).unwrap();
         let Item::Script { body, .. } = &items[0] else {
@@ -899,9 +1058,9 @@ mod tests {
         }
         let report = parse_recovering(
             Path::new("python.sbdsl"),
-            "start:\n    ext.控制:\n        pass\n    else:\n    说 (1)\nafter = 2\n",
+            "start:\n    ext.控制:\n        pass\n    else:\n    说 (1)\n    end\nend\nafter = 2\n",
         );
-        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
         assert!(matches!(&report.items[1], Item::Data { name, .. } if name == "after"));
     }
 
@@ -949,7 +1108,7 @@ mod tests {
 
     #[test]
     fn broken_tokens_keep_later_commands_and_utf8_locations() {
-        let source = "start:\n    说(\"中文 😀\n    等待 (1) 秒\n    移到('鼠标\n    等待 (2) 秒\n    说(1 + 2]\n    等待 (3) 秒\nimport fine\n";
+        let source = "start:\n    说(\"中文 😀\n    等待 (1) 秒\n    移到('鼠标\n    等待 (2) 秒\n    说(1 + 2]\n    等待 (3) 秒\nend\nimport fine\n";
         let report = recover(source);
         assert_eq!(report.errors.len(), 3, "{:?}", report.errors);
         let Item::Script { body, .. } = &report.items[0] else {
@@ -968,7 +1127,7 @@ mod tests {
 
     #[test]
     fn invalid_role_headers_and_misplaced_bodies_do_not_expose_children() {
-        let source = "sprite bare:\n    init:\n        pass\n    global:hidden = 1\nsprite \"real\":\n    init:\n        pass\n    stage:\n        hidden2 = 2\n    sprite \"nested\":\n        init:\n            pass\n        global:hidden3 = 3\n    visible = 4\noutside = 5\n";
+        let source = "sprite bare:\n    init:\n        pass\n    global:hidden = 1\nsprite \"real\":\n    init:\n        pass\n    end\n    stage:\n        hidden2 = 2\n    sprite \"nested\":\n        init:\n            pass\n        end\n        global:hidden3 = 3\n    visible = 4\nend\noutside = 5\n";
         let report = recover(source);
         assert_eq!(report.errors.len(), 3, "{:?}", report.errors);
         assert_eq!(report.items.len(), 2);
@@ -982,7 +1141,7 @@ mod tests {
 
     #[test]
     fn missing_and_invalid_init_retain_role_children() {
-        let source = "sprite \"bad-json\":\n    init:\n        x: ,\n        y: 1\n    a = 1\nsprite \"missing\":\n    b = 2\nsprite \"good\":\n    init:\n        pass\n    c = 3\nimport after\n";
+        let source = "sprite \"bad-json\":\n    init:\n        x: ,\n        y: 1\n    end\n    a = 1\nend\nsprite \"missing\":\n    b = 2\nend\nsprite \"good\":\n    init:\n        pass\n    end\n    c = 3\nend\nimport after\n";
         let report = recover(source);
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
         assert_eq!(report.items.len(), 4);
@@ -997,7 +1156,7 @@ mod tests {
 
     #[test]
     fn nested_errors_retain_if_elif_else_and_outer_sibling() {
-        let source = "start:\n    if <>:\n        var illegal = 1\n        等待 (1) 秒\n    elif <>:\n        var invalid = 2\n        等待 (2) 秒\n    else:\n        等待 (3) 秒\n    等待 (4) 秒\n";
+        let source = "start:\n    if <>:\n        var illegal = 1\n        等待 (1) 秒\n    elif <>:\n        var invalid = 2\n        等待 (2) 秒\n    else:\n        等待 (3) 秒\n    end\n    等待 (4) 秒\nend\n";
         let report = recover(source);
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
         let Item::Script { body, .. } = &report.items[0] else {
@@ -1027,21 +1186,31 @@ mod tests {
 
     #[test]
     fn unfinished_token_at_eof_has_one_primary_error() {
-        for source in [
-            "start:\n    说(\"unfinished",
-            "start:\n    if <>:\n        移到('unfinished",
-            "start:\n    if <>:\n        等待(1 + 2",
-            "start:\n    #\n    unfinished comment",
+        for (source, expected) in [
+            ("start:\n    说(\"unfinished\nend\n", 1),
+            (
+                "start:\n    if <>:\n        移到('unfinished\n    end\nend\n",
+                1,
+            ),
+            ("start:\n    if <>:\n        等待(1 + 2\n    end\nend\n", 1),
+            // The unterminated block comment swallows the closing end, so the
+            // missing-end diagnostic is expected alongside the comment error.
+            ("start:\n    #\n    unfinished comment\nend\n", 2),
         ] {
             let report = recover(source);
-            assert_eq!(report.errors.len(), 1, "{source}\n{:?}", report.errors);
+            assert_eq!(
+                report.errors.len(),
+                expected,
+                "{source}\n{:?}",
+                report.errors
+            );
         }
     }
 
     #[test]
     fn missing_indented_body_recovers_at_next_declaration() {
         let report = recover(
-            "start:\nsprite \"later\":\n    init:\n        pass\n    hp = 1\nimport after\n",
+            "start:\nsprite \"later\":\n    init:\n        pass\n    end\n    hp = 1\nend\nimport after\n",
         );
         assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
         assert_eq!(report.items.len(), 3);
@@ -1051,7 +1220,7 @@ mod tests {
 
     #[test]
     fn comments_multiline_atoms_and_json_escapes_survive_unrelated_errors() {
-        let source = "invalid = true\n# hidden = 1\nvalues = {1,\n    # invisible list comment\n    2}\nstart:\n    说 (\"# literal\")\n    说 'a#b'\n    等待 (8 / 2) 秒\nsprite \"json\":\n    init:\n        costumes: [{name: \"x\", path: \"a\\u002fb#c.svg\"}]\n";
+        let source = "invalid = true\n# hidden = 1\nvalues = {1,\n    # invisible list comment\n    2}\nstart:\n    说 (\"# literal\")\n    说 'a#b'\n    等待 (8 / 2) 秒\nend\nsprite \"json\":\n    init:\n        costumes: [{name: \"x\", path: \"a\\u002fb#c.svg\"}]\n    end\nend\n";
         let report = recover(source);
         assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
         assert_eq!(names(&report.items), ["values"]);
@@ -1070,7 +1239,7 @@ mod tests {
 
     #[test]
     fn malformed_menu_ignores_hashes_and_keeps_later_declarations() {
-        let source = "start:\n    选择 'bad\\q#value'\n    等待 (1) 秒\n    选择 'unfinished#\n    等待 (2) 秒\n    选择 'ok#}/'\nafter = 1\n";
+        let source = "start:\n    选择 'bad\\q#value'\n    等待 (1) 秒\n    选择 'unfinished#\n    等待 (2) 秒\n    选择 'ok#}/'\nend\nafter = 1\n";
         let report = recover(source);
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
         let Item::Script { body, .. } = &report.items[0] else {
@@ -1083,7 +1252,7 @@ mod tests {
 
     #[test]
     fn unfinished_role_name_does_not_expose_indented_contents() {
-        let source = "sprite \"broken:\n    init:\n        pass\n    hidden = 1\nsprite \"safe\":\n    init:\n        pass\n";
+        let source = "sprite \"broken:\n    init:\n        pass\n    hidden = 1\nsprite \"safe\":\n    init:\n        pass\n    end\nend\n";
         let report = recover(source);
         assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
         assert!(names(&report.items).is_empty());

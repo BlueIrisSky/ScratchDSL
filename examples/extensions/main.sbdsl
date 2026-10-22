@@ -1,9 +1,13 @@
 sprite "玩家":
     init:
         pass
+    end
     start:
         移动 (10) 步
         自定义拓展.移动 (20) 步
         说 (自定义拓展.(3) 的两倍)
         if <自定义拓展::"ready"()>:
             自定义拓展.选择 '快速'
+        end
+    end
+end

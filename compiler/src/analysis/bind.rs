@@ -29,7 +29,8 @@ pub(crate) struct BoundProcedure {
 }
 
 pub(crate) struct BoundScript {
-    pub(crate) hat: Invocation,
+    /// None for a piece: a loose top-level stack without a hat.
+    pub(crate) hat: Option<Invocation>,
     pub(crate) body: Vec<BoundStatement>,
     pub(crate) span: Span,
 }
@@ -164,6 +165,9 @@ impl Binder<'_> {
                 self.infer_statement_types(&definition.body, Some(index), &mut errors);
             }
             for (_, body, _) in &target.scripts {
+                self.infer_statement_types(body, Some(index), &mut errors);
+            }
+            for (body, _) in &target.pieces {
                 self.infer_statement_types(body, Some(index), &mut errors);
             }
         }
@@ -533,7 +537,14 @@ pub(crate) fn bind_project(project: &Project, registry: &Registry) -> Result<Bou
         let mut target_scripts = Vec::new();
         for (header, body, span) in &target.scripts {
             target_scripts.push(BoundScript {
-                hat: binder.invocation(header, Shape::Hat, &context, span)?,
+                hat: Some(binder.invocation(header, Shape::Hat, &context, span)?),
+                body: binder.statements(body, &context)?,
+                span: span.clone(),
+            });
+        }
+        for (body, span) in &target.pieces {
+            target_scripts.push(BoundScript {
+                hat: None,
                 body: binder.statements(body, &context)?,
                 span: span.clone(),
             });
@@ -548,7 +559,9 @@ pub(crate) fn bind_project(project: &Project, registry: &Registry) -> Result<Bou
             .filter_map(|(id, p)| (p.scope == Some(index)).then_some(id.clone()))
             .collect();
         for script in target_scripts {
-            collect_invocation_calls(&script.hat, &mut selected);
+            if let Some(hat) = &script.hat {
+                collect_invocation_calls(hat, &mut selected);
+            }
             selected.extend(called_procedures(&script.body));
         }
         let mut pending: Vec<String> = selected.iter().cloned().collect();
@@ -567,7 +580,9 @@ pub(crate) fn bind_project(project: &Project, registry: &Registry) -> Result<Bou
         }
 
         for script in target_scripts {
-            validate_invocation_target(&script.hat, index, &script.span)?;
+            if let Some(hat) = &script.hat {
+                validate_invocation_target(hat, index, &script.span)?;
+            }
             validate_body_target(&script.body, index)?;
         }
         for id in &selected {

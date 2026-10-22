@@ -4,8 +4,12 @@ score = 0
 sprite "玩家":
     init:
         pass
+    end
     start:
         说 ("你好，ScratchDSL！") (2) 秒
         loop 10:
             移动 (10) 步
             score += 1
+        end
+    end
+end
