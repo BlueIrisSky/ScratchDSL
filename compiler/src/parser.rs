@@ -3,6 +3,7 @@
 //! Templates are resolved later. This module preserves their text while checking
 //! source structure, declaration contexts, comments and literal boundaries.
 use crate::model::{Item, Span, SpriteInit, Statement};
+use crate::notation::syntax_ws as whitespace;
 use crate::{Error, Result};
 use serde_json::{Number, Value};
 use std::{
@@ -37,9 +38,6 @@ fn next_char(source: &str, pos: usize) -> Option<char> {
 }
 fn advance(source: &str, pos: usize) -> usize {
     pos + next_char(source, pos).map_or(0, char::len_utf8)
-}
-fn whitespace(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | '\r')
 }
 fn letter(c: char) -> bool {
     matches!(

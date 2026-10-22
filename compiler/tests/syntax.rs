@@ -1,3 +1,5 @@
+mod common;
+use common::assert_parent_edges;
 use sbdsl::{
     analysis::{AnalysisCache, analyze_document},
     build, config,
@@ -12,28 +14,11 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 fn compile(source: &str) -> sbdsl::Result<sbdsl::model::GeneratedProject> {
     let directory = tempfile::tempdir().unwrap();
-    fs::write(directory.path().join("main.sbdsl"), source).unwrap();
-    let configuration = config::discover(Some(Path::new("main.sbdsl")), None, directory.path())?;
-    build::compile(&configuration)
+    common::compile_at(directory.path(), source)
 }
 
 fn input_block<'a>(blocks: &'a Value, block: &Value, name: &str) -> &'a Value {
     &blocks[block["inputs"][name][1].as_str().unwrap()]
-}
-
-fn assert_parent_edges(blocks: &serde_json::Map<String, Value>) {
-    for (id, block) in blocks {
-        if let Some(next) = block["next"].as_str() {
-            assert_eq!(blocks[next]["parent"], id.as_str());
-        }
-        for input in block["inputs"].as_object().unwrap().values() {
-            for descriptor in input.as_array().unwrap().iter().skip(1) {
-                if let Some(child) = descriptor.as_str() {
-                    assert_eq!(blocks[child]["parent"], id.as_str());
-                }
-            }
-        }
-    }
 }
 
 fn expression_tree(expr: &Expr) -> String {

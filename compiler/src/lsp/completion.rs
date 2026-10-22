@@ -14,7 +14,8 @@ use lsp_types::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub fn complete(source: &str, position: Position, registry: &Registry) -> Vec<CompletionItem> {
+#[cfg(test)]
+pub(crate) fn complete(source: &str, position: Position, registry: &Registry) -> Vec<CompletionItem> {
     let Some(cursor) = byte_offset(source, position) else {
         return Vec::new();
     };

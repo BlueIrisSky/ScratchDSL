@@ -7,6 +7,11 @@ use crate::{Error, Result};
 use serde::de::DeserializeOwned;
 use std::{collections::BTreeSet, ops::Range, path::Path};
 
+/// Whitespace accepted between DSL tokens: ASCII spaces, tabs and newlines.
+pub(crate) fn syntax_ws(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\r' | '\n')
+}
+
 /// Build files additionally allow `"path.js" as "alias"` in the root
 /// `extensions` array. Sprite initialization and other data values do not.
 pub fn parse_build<T: DeserializeOwned>(path: &Path, source: &str) -> Result<T> {
@@ -149,7 +154,7 @@ impl Parser<'_> {
         let start = self.pos;
         loop {
             match self.peek() {
-                Some(' ' | '\t' | '\r' | '\n') => self.pos += 1,
+                Some(c) if syntax_ws(c) => self.pos += 1,
                 Some('#') => {
                     self.pos = comment_end(&self.source[..self.end], self.pos)
                         .ok_or_else(|| self.error(self.pos, "unterminated block comment"))?;

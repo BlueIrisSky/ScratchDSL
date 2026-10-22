@@ -6,9 +6,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const CONFIG_FILE: &str = "sbdsl.buildsb";
+const CONFIG_FILE: &str = "sbdsl.buildsb";
 
-pub fn is_config(path: &Path) -> bool {
+fn is_config(path: &Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension == "buildsb")
 }
@@ -155,7 +155,7 @@ fn find_config(dir: &Path, provider: &dyn SourceProvider) -> Option<PathBuf> {
 }
 
 /// CLI discovery semantics, with reads/existence supplied by a source snapshot.
-pub fn discover_with_provider(
+fn discover_with_provider(
     input: Option<&Path>,
     output: Option<&Path>,
     cwd: &Path,

@@ -1,12 +1,8 @@
+mod common;
+use common::{assert_graph, compile_at as compile};
 use sbdsl::{build, config};
 use serde_json::{Value, json};
 use std::{fs, path::Path};
-
-fn compile(root: &Path, source: &str) -> sbdsl::Result<sbdsl::model::GeneratedProject> {
-    fs::write(root.join("main.sbdsl"), source).unwrap();
-    let config = config::discover(Some(Path::new("main.sbdsl")), None, root)?;
-    build::compile(&config)
-}
 
 fn tiny_wav() -> Vec<u8> {
     let mut wav = Vec::new();
@@ -24,27 +20,6 @@ fn tiny_wav() -> Vec<u8> {
     wav.extend_from_slice(&16u32.to_le_bytes());
     wav.extend_from_slice(&[0; 16]);
     wav
-}
-
-fn assert_graph(project: &Value) {
-    for target in project["targets"].as_array().unwrap() {
-        let blocks = target["blocks"].as_object().unwrap();
-        for (id, block) in blocks {
-            if let Some(next) = block["next"].as_str() {
-                assert_eq!(blocks[next]["parent"], id.as_str(), "next parent of {id}");
-            }
-            if block["topLevel"] == true {
-                assert!(block["parent"].is_null());
-            }
-            for input in block["inputs"].as_object().unwrap().values() {
-                for desc in input.as_array().unwrap().iter().skip(1) {
-                    if let Some(child) = desc.as_str() {
-                        assert_eq!(blocks[child]["parent"], id.as_str(), "input parent of {id}");
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[test]

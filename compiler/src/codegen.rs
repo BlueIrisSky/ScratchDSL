@@ -1,12 +1,15 @@
 //! Semantic binding and native Scratch 3 block-graph generation.
 use crate::analysis::bind::{BoundProcedure, BoundProject, BoundStatement, called_procedures};
-use crate::{Error, Result, model::*, registry::Registry};
+use crate::{Error, Result, model::*};
+#[cfg(test)]
+use crate::registry::Registry;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Compile a merged project. Asset population and extension source embedding are
 /// deliberately owned by the packaging layer.
-pub fn generate(project: &Project, registry: &Registry) -> Result<GeneratedProject> {
+#[cfg(test)]
+pub(crate) fn generate(project: &Project, registry: &Registry) -> Result<GeneratedProject> {
     let analysis = crate::analysis::bind::bind_project(project, registry)?;
     generate_bound(&analysis)
 }

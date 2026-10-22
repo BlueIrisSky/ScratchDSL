@@ -433,10 +433,16 @@ pub(super) struct LayoutScope {
 }
 
 fn indentation_width(line: &str) -> usize {
+    // Tab stops every 4 columns, matching the strict parser's indentation.
     line.chars()
         .take_while(|c| matches!(c, ' ' | '\t'))
-        .map(|c| if c == '\t' { 4 } else { 1 })
-        .sum()
+        .fold(0, |column, c| {
+            if c == '\t' {
+                (column / 4 + 1) * 4
+            } else {
+                column + 1
+            }
+        })
 }
 
 fn is_layout_header(line: &str) -> bool {

@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use crate::model::*;
+use crate::notation::syntax_ws;
 use crate::parser::{
     assignment_parts, parse_menu, parse_name, parse_number, parse_reference, parse_string,
     scan_atom, scan_atom_candidates, strip_comments,
@@ -785,9 +786,6 @@ fn diagnostic_excerpt(text: &str, limit: usize) -> String {
     }
 }
 
-pub(crate) fn syntax_ws(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\r' | '\n')
-}
 fn skip_ws(s: &str, p: usize) -> usize {
     p + s[p..]
         .chars()
