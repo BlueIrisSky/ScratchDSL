@@ -671,7 +671,7 @@ fn sprite_add_preserves_init_and_duplicate_creation_is_rejected() {
         assert!(error.contains("玩家"), "{error}");
         assert!(error.contains("add"), "{error}");
         assert!(
-            error.contains(":2:") || error.contains(":4:") || error.contains(":5:"),
+            error.contains(":2:") || error.contains(":4:") || error.contains(":6:"),
             "{error}"
         );
     }
@@ -721,7 +721,10 @@ fn costume_order_is_preserved_and_names_are_unique_per_asset_kind() {
         r#"sprite "玩家":
     init:
         "costumes": [{"name":"第二","path":"b.svg"},{"name":"第一","path":"a.svg"}],
-        "sounds": [{"name":"第二","path":"tone.wav"}]"#,
+        "sounds": [{"name":"第二","path":"tone.wav"}]
+    end
+end
+"#,
     )
     .unwrap();
     let target = &p.json["targets"][1];

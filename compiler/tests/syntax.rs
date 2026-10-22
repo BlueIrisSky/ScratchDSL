@@ -504,7 +504,7 @@ fn typed_matching_and_inferred_data_kinds_resolve_lists_and_reject_conversions()
     assert_parent_edges(blocks);
 
     let project = compile(
-        "def reset:\n    entries = {\"global\"}\nend\nsprite \"player\":\n    init:\n        pass\n    entries = {\"private\"}\n    start:\n        score = ((future) 的项目数)\n        if <score = 0>:\n            future = {1}\n        end\n        entries = {\"changed\"}\n        reset\n    end\n",
+        "def reset:\n    entries = {\"global\"}\nend\nsprite \"player\":\n    init:\n        pass\n    end\n    entries = {\"private\"}\n    start:\n        score = ((future) 的项目数)\n        if <score = 0>:\n            future = {1}\n        end\n        entries = {\"changed\"}\n        reset\n    end\nend\n",
     )
     .unwrap();
     let global_id = project.json["targets"][0]["lists"]
@@ -552,10 +552,10 @@ fn data_kind_conflicts_and_live_diagnostics_are_enforced_across_scopes() {
         "start:\n    name = {}\n    name += 1\nend\n",
         "name = {}\nstart:\n    name = 1\nend\n",
         "name = 1\nstart:\n    name = {}\nend\n",
-        "name = 1\nsprite \"a\":\n    init:\n        pass\n    name = {}\n",
-        "sprite \"a\":\n    init:\n        pass\n    name = 1\nstart:\n    name = {}\nend\n",
-        "sprite \"甲\":\n    init:\n        pass\n    value = {}\nsprite \"乙\":\n    init:\n        pass\n    start:\n        value = 1\n    end\n",
-        "sprite \"玩家\":\n    init:\n        pass\n    value = 1\nsprite \"玩家\" add:\n    value = {}\n",
+        "name = 1\nsprite \"a\":\n    init:\n        pass\n    end\n    name = {}\nend\n",
+        "sprite \"a\":\n    init:\n        pass\n    end\n    name = 1\nend\nstart:\n    name = {}\nend\n",
+        "sprite \"甲\":\n    init:\n        pass\n    end\n    value = {}\nend\nsprite \"乙\":\n    init:\n        pass\n    end\n    start:\n        value = 1\n    end\nend\n",
+        "sprite \"玩家\":\n    init:\n        pass\n    end\n    value = 1\nend\nsprite \"玩家\" add:\n    value = {}\nend\n",
     ] {
         let error = compile(source).unwrap_err();
         assert!(error.span().is_some(), "{source}: {error}");
@@ -714,6 +714,7 @@ logs = {"开始", 1, "开始"}
 sprite "玩家":
     init:
         x: -100
+    end
     score = 0
     def 增加 @amount:
         score += @amount
@@ -738,6 +739,7 @@ sprite "玩家":
         end
         停止 'this script'
     end
+end
 "#,
     )
     .unwrap();

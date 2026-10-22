@@ -265,12 +265,25 @@ impl IndentedParser<'_> {
 
     /// Collect declaration members until their matching `end`. Unlike a
     /// statement body, a member list may contain data, procedures and scripts.
+    /// The closing `end` aligns with the header, not with the member indent.
     fn items_until_end(&mut self, context: Context, indent: usize, header: &Unit) -> Vec<Item> {
         let mut items = Vec::new();
-        while let Some(unit) = self.next_at(indent) {
-            if unit.header == "end" && !unit.body {
-                return items;
+        loop {
+            match self.peek() {
+                Some((start, actual)) if actual <= header.indent => {
+                    if actual == header.indent && self.line_text(start) == "end" {
+                        self.pos = physical_line_end(&self.source, start);
+                        return items;
+                    }
+                    break;
+                }
+                Some((_, actual)) if actual < indent => break,
+                None => break,
+                _ => {}
             }
+            let Some(unit) = self.next_at(indent) else {
+                break;
+            };
             if let Some(item) = self.item(&unit, context) {
                 items.push(item);
             }
@@ -807,7 +820,7 @@ mod tests {
         };
         assert_eq!(header, "elif <@n = 0>");
         assert!(body.is_empty());
-        assert_eq!((span.line, span.column), (10, 9));
+        assert_eq!((span.line, span.column), (11, 9));
         assert_eq!(&source[span.start..span.end], header);
         assert!(matches!(
             &otherwise[0],
@@ -900,7 +913,7 @@ mod tests {
         let Statement::Command { span, .. } = &body[0] else {
             panic!()
         };
-        assert_eq!(span.line, 5);
+        assert_eq!(span.line, 6);
         assert_eq!(&source[span.start..span.end], "说 (\"ok\")");
     }
 

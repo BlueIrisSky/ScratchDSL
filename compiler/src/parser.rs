@@ -1824,7 +1824,7 @@ end
         let Item::Data { span, .. } = &body[0] else {
             panic!()
         };
-        assert_eq!((span.line, span.column), (17, 5));
+        assert_eq!((span.line, span.column), (18, 5));
         assert!(matches!(
             &items[1],
             Item::Sprite {

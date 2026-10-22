@@ -176,7 +176,7 @@ fn is_file_diagnostic(message: &Value, path: &std::path::Path) -> bool {
             })
 }
 const VALID: &str =
-    "sprite \"玩家😀\":\n    init:\n        pass\n    start:\n        移动 (10) 步\n    end";
+    "sprite \"玩家😀\":\n    init:\n        pass\n    end\n    start:\n        移动 (10) 步\n    end\nend";
 
 #[test]
 fn stdio_diagnostics_completion_versions_and_shutdown() {
@@ -189,11 +189,11 @@ fn stdio_diagnostics_completion_versions_and_shutdown() {
     client.diagnostics(&uri, 1, false);
     client.change(&uri, 2, &VALID.replace("移动 (10) 步", "不存在的积木"));
     let diagnostics = client.diagnostics(&uri, 2, true);
-    assert_eq!(diagnostics["diagnostics"][0]["range"]["start"]["line"], 4);
+    assert_eq!(diagnostics["diagnostics"][0]["range"]["start"]["line"], 5);
     client.change(&uri, 3, &VALID.replace("移动 (10) 步", "移"));
     let completion = client.request(
         "textDocument/completion",
-        json!({"textDocument":{"uri":uri},"position":{"line":4,"character":9}}),
+        json!({"textDocument":{"uri":uri},"position":{"line":5,"character":9}}),
     );
     let items = completion["items"].as_array().unwrap();
     assert!(
@@ -280,7 +280,7 @@ fn project_ast_diagnostics_include_multiple_errors_and_unopened_imports() {
     let main = directory.path().join("main.sbdsl");
     let module = directory.path().join("library.sbdsl");
     let (main_uri, module_uri) = (uri(&main), uri(&module));
-    let source = "a = \nb = {1,}\nsprite \"玩家😀\":\n    init:\n        pass\n    start:\n        不存在的动作\n    end\nimport library\n";
+    let source = "a = \nb = {1,}\nsprite \"玩家😀\":\n    init:\n        pass\n    end\n    start:\n        不存在的动作\n    end\nend\nimport library\n";
     std::fs::write(&main, source).unwrap();
     std::fs::write(&module, "a = \nb = {1,}\n").unwrap();
     let mut client = Client::start(false);
@@ -305,7 +305,7 @@ fn project_ast_diagnostics_include_multiple_errors_and_unopened_imports() {
         .iter()
         .map(|d| d["range"]["start"]["line"].as_u64().unwrap())
         .collect();
-    assert_eq!(lines, vec![0, 1, 6]);
+    assert_eq!(lines, vec![0, 1, 7]);
     let module_diagnostics = &published[&module_uri];
     assert_eq!(
         module_diagnostics["diagnostics"].as_array().unwrap().len(),
@@ -822,7 +822,7 @@ fn assignment_completion_and_diagnostics_use_script_scope_and_utf16_targets() {
     let main = directory.path().join("赋值😀.sbdsl");
     let source = |body: &str| {
         format!(
-            "score = 1\nlogs = {{}}\nsprite \"玩家😀\":\n    init:\n        pass\n    score = 2\n    特殊分数 = 3\n    def 更新 @steps:\n        {body}\n    end\nsprite \"其他\":\n    init:\n        pass\n    hidden = 4"
+            "score = 1\nlogs = {{}}\nsprite \"玩家😀\":\n    init:\n        pass\n    end\n    score = 2\n    特殊分数 = 3\n    def 更新 @steps:\n        {body}\n    end\nend\nsprite \"其他\":\n    init:\n        pass\n    end\n    hidden = 4\nend"
         )
     };
     let initial = source("score += @steps * 2");
@@ -863,7 +863,7 @@ fn assignment_completion_and_diagnostics_use_script_scope_and_utf16_targets() {
                 .count();
             assert_eq!(
                 selected["textEdit"]["range"]["start"],
-                json!({"line": 8, "character": character})
+                json!({"line": 9, "character": character})
             );
             assert_eq!(
                 selected["textEdit"]["range"]["end"]["character"],
