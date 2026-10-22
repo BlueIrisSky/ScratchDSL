@@ -4,7 +4,7 @@
 
 ## 安装和使用
 
-从 [GitHub Releases](https://github.com/BlueIrisSky/ScratchDSL/releases/tag/v0.2.0) 下载 `scratchdsl-0.2.0-win32-x64.vsix`，在扩展视图右上角选择“从 VSIX 安装…”并打开它。随后打开工程文件夹和 `.sbdsl` 文件，语言模式应显示为 ScratchDSL。
+从 [GitHub Releases](https://github.com/BlueIrisSky/ScratchDSL/releases/tag/v0.3.0) 下载 `scratchdsl-0.3.0-win32-x64.vsix`，在扩展视图右上角选择“从 VSIX 安装…”并打开它。随后打开工程文件夹和 `.sbdsl` 文件，语言模式应显示为 ScratchDSL。
 
 构建配置 `*.buildsb` 使用独立的 ScratchDSL Build 语言模式（`sbdsl-build`），支持字段、值和注释高亮。打开配置时，点击编辑器右上角的构建按钮即可使用这份配置编译工程；自动查找配置时只识别默认名称 `sbdsl.buildsb`。
 

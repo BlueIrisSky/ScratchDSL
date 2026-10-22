@@ -81,7 +81,7 @@ npm run test:host
 检查打包后的 VSIX 时，在插件目录运行：
 
 ```powershell
-node test/run-host.cjs --installed C:\完整路径\scratchdsl-0.2.0-win32-x64.vsix
+node test/run-host.cjs --installed C:\完整路径\scratchdsl-0.3.0-win32-x64.vsix
 ```
 
 这个模式将 VSIX 安装到临时 extensions 目录，再运行同一组测试，不影响已有插件。
@@ -116,7 +116,7 @@ node test/run-host.cjs --installed C:\完整路径\scratchdsl-0.2.0-win32-x64.vs
 .\packaging\package-vscode.ps1
 ```
 
-[`package-vscode.ps1`](../packaging/package-vscode.ps1) 调用编译器打包步骤，将 EXE 和更新后的 Rust 依赖许可复制到插件 `server/`，执行 `npm ci` 和插件测试，核对编译器与插件版本一致，再运行 `vsce package --target win32-x64 --pre-release`。当前过渡阶段的 VSIX 也带有预发布标记。输出为 `dist/scratchdsl-0.2.0-win32-x64.vsix`。`-Npm` 可指定 npm，`-SkipBuild` 复用已经验证的 release 编译器。
+[`package-vscode.ps1`](../packaging/package-vscode.ps1) 调用编译器打包步骤，将 EXE 和更新后的 Rust 依赖许可复制到插件 `server/`，执行 `npm ci` 和插件测试，核对编译器与插件版本一致，再运行 `vsce package --target win32-x64 --pre-release`。当前过渡阶段的 VSIX 也带有预发布标记。输出为 `dist/scratchdsl-0.3.0-win32-x64.vsix`。`-Npm` 可指定 npm，`-SkipBuild` 复用已经验证的 release 编译器。
 
 包内包含语言文件、客户端 bundle、原生 EXE、MIT 许可证和第三方许可，不包含源码、`node_modules`、测试工程或构建缓存。打包脚本不会自动安装插件或发布到 Marketplace。成品只支持本地 Windows x64，其他系统、远程工作区和浏览器版尚未支持。
 
@@ -128,13 +128,13 @@ node test/run-host.cjs --installed C:\完整路径\scratchdsl-0.2.0-win32-x64.vs
 - Windows：运行插件类型检查、高亮测试、打包后的 VSIX extension-host 测试，以及隔离注册表中的 PATH 测试；构建安装包与免安装包。
 - 推送版本标签：检查标签、编译器、插件和安装器版本一致，全部检查通过后创建 GitHub Release 并上传文件。发布说明读取 `docs/releases/<版本>.md`。当前过渡阶段使用 GitHub 预发布标记，不替换稳定版的 Latest。手动启动工作流只检查和打包。
 
-当前版本为 `0.2.0`，对应标签 `v0.2.0`，是包含不兼容语法变化的过渡预发布版。发布页提供：
+当前版本为 `0.3.0`，对应标签 `v0.3.0`，是过渡预发布版。发布页提供：
 
 | 文件 | 用途 |
 | --- | --- |
 | `Install.exe` | Windows x64 独立离线安装包，自动配置当前用户 PATH |
-| `scratchdsl-0.2.0-windows-x64.zip` | Windows x64 免安装包，包含 CLI、文档、示例和第三方许可 |
-| `scratchdsl-0.2.0-win32-x64.vsix` | Windows x64 VS Code 插件，自带 CLI 和语言服务器 |
+| `scratchdsl-0.3.0-windows-x64.zip` | Windows x64 免安装包，包含 CLI、文档、示例和第三方许可 |
+| `scratchdsl-0.3.0-win32-x64.vsix` | Windows x64 VS Code 插件，自带 CLI 和语言服务器 |
 | `sbdsl.exe` | 单独的 Windows x64 编译器，分发时应附下面两份许可文件 |
 | `SHA256SUMS.txt` | 下载文件的 SHA-256 校验值 |
 | `release-manifest.json` | 版本、构建来源和文件信息 |

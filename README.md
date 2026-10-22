@@ -1,12 +1,12 @@
 # ScratchDSL
 
-用文本编写 Scratch 项目，编译成 `.sb3`。编译器使用 Rust，当前版本为 `0.2.0`。
+用文本编写 Scratch 项目，编译成 `.sb3`。编译器使用 Rust，当前版本为 `0.3.0`。
 
-**0.2.0 是过渡预发布版。** 本版包含较大的、不兼容旧代码的语法变化，后续过渡版本的语法仍可能大幅调整。升级前请备份源码，按[语法文档](docs/syntax.md)修改项目；变更概要见[发布说明](docs/releases/0.2.0.md)。
+**0.3.0 是过渡预发布版。** 过渡阶段的语法仍可能大幅调整。升级前请备份源码，按[语法文档](docs/syntax.md)修改项目；变更概要见[发布说明](docs/releases/0.3.0.md)。
 
 ## 开始使用
 
-从 [Releases](https://github.com/BlueIrisSky/ScratchDSL/releases/tag/v0.2.0) 下载 Windows x64 安装包 `Install.exe`。安装后重新打开终端，执行：
+从 [Releases](https://github.com/BlueIrisSky/ScratchDSL/releases/tag/v0.3.0) 下载 Windows x64 安装包 `Install.exe`。安装后重新打开终端，执行：
 
 ```powershell
 sbdsl init demo
@@ -34,9 +34,9 @@ end
 
 第三方扩展的 C 型积木支持 `扩展.文字(参数):` 和缩进体，多个分支用同级 `else:` 接续，最后用同级 `end` 结束。编译器按扩展元信息映射输入参数和各分支，详见[扩展文档](docs/extensions.md#c-型控制积木)。不挂事件帽子的独立积木段写成 `piece:` 后换行缩进，并以同级 `end` 结束；它不会自动运行，只会作为素材编译进 `.sb3`。
 
-同一发布页提供免安装包 `scratchdsl-0.2.0-windows-x64.zip` 和文件校验值 `SHA256SUMS.txt`。安装包可独立离线安装；CLI 和语言服务器均为独立 Rust 程序，使用时无需安装 Rust 或 Node.js。
+同一发布页提供免安装包 `scratchdsl-0.3.0-windows-x64.zip` 和文件校验值 `SHA256SUMS.txt`。安装包可独立离线安装；CLI 和语言服务器均为独立 Rust 程序，使用时无需安装 Rust 或 Node.js。
 
-VS Code 插件可通过“从 VSIX 安装…”加载发布页中的 `scratchdsl-0.2.0-win32-x64.vsix`。打开 `.sbdsl` 后可使用高亮、错误提示和积木补全，按 `Ctrl+Space` 手动唤起补全。打开 `sbdsl.buildsb` 后，可点击编辑器右上角的构建按钮。插件自带编译器。
+VS Code 插件可通过“从 VSIX 安装…”加载发布页中的 `scratchdsl-0.3.0-win32-x64.vsix`。打开 `.sbdsl` 后可使用高亮、错误提示和积木补全，按 `Ctrl+Space` 手动唤起补全。打开 `sbdsl.buildsb` 后，可点击编辑器右上角的构建按钮。插件自带编译器。
 
 ## 文档
 
@@ -67,7 +67,7 @@ cargo test --locked
 
 [基础示例](examples/hello/main.sbdsl)和[扩展示例](examples/extensions/main.sbdsl)在 `examples/`。发行文件放在 `dist/`，构建缓存和本地测试资料放在 `target/`，这两个目录都已排除 Git。
 
-GitHub Actions 在 Linux 和 Windows 上检查 Rust 代码，并在 Windows 上测试和打包插件。发布标签 `v0.2.0` 时，检查通过后会自动上传安装包、免安装包和 VSIX，标记为过渡预发布版，流程见[开发文档](docs/development.md#自动检查与发布)。
+GitHub Actions 在 Linux 和 Windows 上检查 Rust 代码，并在 Windows 上测试和打包插件。发布标签 `v0.3.0` 时，检查通过后会自动上传安装包、免安装包和 VSIX，标记为过渡预发布版，流程见[开发文档](docs/development.md#自动检查与发布)。
 
 ## 许可
 

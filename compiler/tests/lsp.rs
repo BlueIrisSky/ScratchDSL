@@ -175,8 +175,7 @@ fn is_file_diagnostic(message: &Value, path: &std::path::Path) -> bool {
                 sbdsl::analysis::normalize_path(&actual) == sbdsl::analysis::normalize_path(path)
             })
 }
-const VALID: &str =
-    "sprite \"玩家😀\":\n    init:\n        pass\n    end\n    start:\n        移动 (10) 步\n    end\nend";
+const VALID: &str = "sprite \"玩家😀\":\n    init:\n        pass\n    end\n    start:\n        移动 (10) 步\n    end\nend";
 
 #[test]
 fn stdio_diagnostics_completion_versions_and_shutdown() {

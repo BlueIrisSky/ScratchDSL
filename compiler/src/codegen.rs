@@ -1,8 +1,8 @@
 //! Semantic binding and native Scratch 3 block-graph generation.
 use crate::analysis::bind::{BoundProcedure, BoundProject, BoundStatement, called_procedures};
-use crate::{Error, Result, model::*};
 #[cfg(test)]
 use crate::registry::Registry;
+use crate::{Error, Result, model::*};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 

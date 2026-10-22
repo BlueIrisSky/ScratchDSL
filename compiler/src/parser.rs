@@ -1921,7 +1921,8 @@ end
 
     #[test]
     fn init_notation_errors_keep_original_spans_and_recovery_children() {
-        let text = "sprite \"角色 😀\":\n init:\n  x: 1\n  x: 2\n end\n hp = 100\nend\nimport next\n";
+        let text =
+            "sprite \"角色 😀\":\n init:\n  x: 1\n  x: 2\n end\n hp = 100\nend\nimport next\n";
         let error = source(text).unwrap_err();
         assert!(error.0.contains("duplicate field"));
         assert_eq!(

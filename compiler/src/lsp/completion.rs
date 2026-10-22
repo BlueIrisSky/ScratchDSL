@@ -15,7 +15,11 @@ use lsp_types::{
 use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
-pub(crate) fn complete(source: &str, position: Position, registry: &Registry) -> Vec<CompletionItem> {
+pub(crate) fn complete(
+    source: &str,
+    position: Position,
+    registry: &Registry,
+) -> Vec<CompletionItem> {
     let Some(cursor) = byte_offset(source, position) else {
         return Vec::new();
     };
@@ -2284,15 +2288,15 @@ mod tests {
             let selected = items.iter().find(|i| i.label == "rotationStyle").unwrap();
             compile_source(&apply(&source, selected));
         }
-        let (source, cursor) =
-            marked("sprite \"玩家\" :\n    init :\n        \"rotationStyle\": \"le|\"\n    end\nend");
+        let (source, cursor) = marked(
+            "sprite \"玩家\" :\n    init :\n        \"rotationStyle\": \"le|\"\n    end\nend",
+        );
         let items = complete(&source, cursor, &registry);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "left-right");
         compile_source(&apply(&source, &items[0]));
-        let (source, cursor) = marked(
-            "sprite \"玩家\" :\n    init :\n        \"visible\": f|\n    end\nend",
-        );
+        let (source, cursor) =
+            marked("sprite \"玩家\" :\n    init :\n        \"visible\": f|\n    end\nend");
         let items = complete(&source, cursor, &registry);
         assert_eq!(items[0].label, "false");
         compile_source(&apply(&source, &items[0]));

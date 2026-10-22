@@ -9,8 +9,7 @@ fn recovery_reports_syntax_import_and_binding_errors_across_the_project() {
     let broken = directory.path().join("broken.sbdsl");
     let healthy = directory.path().join("healthy.sbdsl");
     let source = "broken = \nbrokenList = {1,}\nimport missing\nsprite \"玩家\":\n    init:\n        pass\n    end\n    start:\n        不存在的动作\n        删除 (missing) 的全部项目\n        说 (@missing)\n        后续动作\n    end\nend\nimport broken\nimport healthy\n";
-    let broken_source =
-        "alsoBroken = \nsprite \"玩家\" add:\n    start:\n        另一个不存在的动作\n    end\nend\n";
+    let broken_source = "alsoBroken = \nsprite \"玩家\" add:\n    start:\n        另一个不存在的动作\n    end\nend\n";
     fs::write(&broken, broken_source).unwrap();
     fs::write(&healthy, "def 后续动作:\n    等待 (0) 秒\nend\n").unwrap();
     let overlays = BTreeMap::from([(main.clone(), source.into())]);
