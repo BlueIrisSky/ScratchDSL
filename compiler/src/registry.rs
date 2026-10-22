@@ -1229,7 +1229,10 @@ mod tests {
             ("(.5*-.5)", "operator_multiply"),
             ("(1e+5/2E-1)", "operator_divide"),
             ("((8/2)/(4/2))", "operator_divide"),
-            ("<<hp<2> 与 <score>100>>", "operator_and"),
+            ("<<hp<2> and <score>100>>", "operator_and"),
+            // Variables named like logical keywords still parse as operands.
+            ("<and = 1>", "operator_equals"),
+            ("<not > 2>", "operator_gt"),
             ("<(8/2)>(3-2)>", "operator_gt"),
             ("(8 / # division comment\n 2)", "operator_divide"),
             ("(1+2*3)", "operator_add"),

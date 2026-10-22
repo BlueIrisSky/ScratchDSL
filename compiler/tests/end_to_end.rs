@@ -150,7 +150,7 @@ sprite "运算":
         说 (1e-5--2)
         说 (8 /
             (6 / 2))
-        if <<hp < 2> 与 <score>100>>:
+        if <<hp < 2> and <score>100>>:
             score = (score - 1)
         end
         说 ("后续命令")

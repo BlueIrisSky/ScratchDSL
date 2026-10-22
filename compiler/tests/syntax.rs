@@ -282,7 +282,7 @@ fn assignment_contexts_spans_recovery_and_multiline_boundaries() {
         "<score >\n        global:limit>",
         "<score >\n        global>",
         "<score >\n        @limit>",
-        "<<score < limit> 与\n        <score > 0>>",
+        "<<score < limit> and\n        <score > 0>>",
         "<(score +\n        1) > limit>",
     ] {
         source.push_str(&format!("    flag = {expression}\n"));

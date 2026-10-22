@@ -530,21 +530,21 @@ pub fn templates() -> Vec<Template> {
     add(
         "operator_and",
         Boolean,
-        "[OPERAND1] 与 [OPERAND2]",
+        "[OPERAND1] and [OPERAND2]",
         vec![boolean("OPERAND1"), boolean("OPERAND2")],
         false,
     );
     add(
         "operator_or",
         Boolean,
-        "[OPERAND1] 或 [OPERAND2]",
+        "[OPERAND1] or [OPERAND2]",
         vec![boolean("OPERAND1"), boolean("OPERAND2")],
         false,
     );
     add(
         "operator_not",
         Boolean,
-        "不成立 [OPERAND]",
+        "not [OPERAND]",
         vec![boolean("OPERAND")],
         false,
     );

@@ -82,7 +82,7 @@
 | `(A % B)` / `((A) 除以 (B) 的余数)` | `operator_mod` |
 | `(在 (FROM) 和 (TO) 之间取随机数)` | `operator_random` |
 | `<A > B>` / `<A < B>` / `<A = B>` | `operator_gt` / `operator_lt` / `operator_equals` |
-| `<<A> 与 <B>>` / `<<A> 或 <B>>` / `<不成立 <A>>` | `operator_and` / `operator_or` / `operator_not` |
+| `<<A> and <B>>` / `<<A> or <B>>` / `<not <A>>` | `operator_and` / `operator_or` / `operator_not` |
 | `(连接 (STRING1) 和 (STRING2))` | `operator_join` |
 | `((STRING) 的第 (LETTER) 个字符)` | `operator_letter_of` |
 | `((STRING) 的字符数)` | `operator_length` |

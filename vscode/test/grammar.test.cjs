@@ -119,26 +119,26 @@ test('menus require single quotes and use JSON escapes plus escaped apostrophes'
 });
 
 test('logical words in command and reporter template text retain their text scopes', () => {
-  const [command] = tokenize('ext.张量("A")与("B")进行\'*\'运算赋值给("product")');
-  for (const text of ['张量', '与', '进行', '运算赋值给']) {
+  const [command] = tokenize('ext.张量("A")and("B")进行\'*\'运算赋值给("product")');
+  for (const text of ['张量', 'and', '进行', '运算赋值给']) {
     has(command, text, 'support.function.command.sbdsl');
     lacks(command, text, 'keyword.operator.logical.');
   }
-  const [reporter] = tokenize('说(连接("A")与("B")或("C")不成立)');
-  for (const text of ['连接', '与', '或', '不成立']) {
+  const [reporter] = tokenize('说(连接("A")and("B")or("C")not)');
+  for (const text of ['连接', 'and', 'or', 'not']) {
     has(reporter, text, 'support.function.reporter.sbdsl');
     lacks(reporter, text, 'keyword.operator.logical.');
   }
 });
 
 test('logical operators are highlighted within boolean inputs and isolated from literals', () => {
-  const [row] = tokenize('等待直到<<true>与<不成立<false>>>');
-  for (const text of ['与', '不成立']) {
+  const [row] = tokenize('等待直到<<true>and<not<false>>>');
+  for (const text of ['and', 'not']) {
     has(row, text, 'keyword.operator.logical.sbdsl');
     lacks(row, text, 'support.function.command.');
   }
-  const [literal] = tokenize('说("与 或 不成立") 模式\'与 或 不成立\'');
-  for (const text of ['与', '或', '不成立']) {
+  const [literal] = tokenize('说("and or not") 模式\'and or not\'');
+  for (const text of ['and', 'or', 'not']) {
     has(literal, text, 'string.quoted.double.sbdsl');
     has(literal, text, 'string.quoted.single.menu.sbdsl', 1);
   }
@@ -458,8 +458,8 @@ test('comparison operators and surrounding boolean delimiters have distinct scop
     const trailing = line.line.lastIndexOf('2');
     assert(!scopesAt(line, trailing).includes('meta.block.boolean.sbdsl'), source);
   }
-  const [nested] = tokenize('等待直到<<hp < 1> 或 <score > 100>>');
-  has(nested, '或', 'keyword.operator.logical.sbdsl');
+  const [nested] = tokenize('等待直到<<hp < 1> or <score > 100>>');
+  has(nested, 'or', 'keyword.operator.logical.sbdsl');
   for (const index of [0, 2, 3]) has(nested, '>', 'punctuation.definition.boolean.end.sbdsl', index);
 });
 
