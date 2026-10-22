@@ -109,10 +109,10 @@ export async function run(): Promise<void> {
   await replace(document, original);
 
   const symbolSource = "score = 0\n特殊名称 = 1\n日志 = {}\n" +
-    "def 公共动作:\n    等待(0)秒\n" +
-    "sprite \"玩家\":\n    init:\n        pass\n    hp = 100\n" +
-    "    def 私有动作:\n        等待(0)秒\n" +
-    "    start:\n        CALL\nimport module\n";
+    "def 公共动作:\n    等待(0)秒\nend\n" +
+    "sprite \"玩家\":\n    init:\n        pass\n    end\n    hp = 100\n" +
+    "    def 私有动作:\n        等待(0)秒\n    end\n" +
+    "    start:\n        CALL\n    end\nend\nimport module\n";
   for (const [marked, label, expected] of [
     ['说(h|pSuffix)', 'hp', '说(hp)'],
     ['h|pSuffix = 10', 'hp', 'hp = 10'],
