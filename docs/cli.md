@@ -2,13 +2,13 @@
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/BlueIrisSky/ScratchDSL/releases/tag/v0.3.0) 下载并运行 Windows x64 安装包 `Install.exe`。它会把程序目录加入当前用户的 PATH，安装后重新打开终端即可使用 `sbdsl`，不需要管理员权限。
+从 [GitHub Releases](https://github.com/BlueIrisSky/ScratchDSL/releases/tag/v0.4.0) 下载并运行 Windows x64 安装包 `Install.exe`。它会把程序目录加入当前用户的 PATH，安装后重新打开终端即可使用 `sbdsl`，不需要管理员权限。
 
 安装包可以单独离线分发，已经包含编译器、示例、文档和第三方许可。安装与卸载使用 Windows 自带的 PowerShell；使用编译器不需要 Rust、Cargo 或 Node.js。
 
 重新安装时会先卸载旧版；旧版卸载失败就停止安装。卸载只移除程序自己的文件和它添加的 PATH 条目，保留用户原有的路径和自建文件。
 
-免安装使用时，下载 `scratchdsl-0.3.0-windows-x64.zip` 并解压，通过程序路径运行，例如 `.\sbdsl.exe --version`。压缩包包含编译器、文档、示例、`LICENSE` 和 `THIRD_PARTY_NOTICES.txt`，转发编译器时请保留这两份许可文件。免安装包不修改 PATH。
+免安装使用时，下载 `scratchdsl-0.4.0-windows-x64.zip` 并解压，通过程序路径运行，例如 `.\sbdsl.exe --version`。压缩包包含编译器、文档、示例、`LICENSE` 和 `THIRD_PARTY_NOTICES.txt`，转发编译器时请保留这两份许可文件。免安装包不修改 PATH。
 
 发布页中的 `SHA256SUMS.txt` 列出了各个下载文件的 SHA-256。可用 `Get-FileHash .\Install.exe -Algorithm SHA256` 查看文件校验值并与之核对。
 

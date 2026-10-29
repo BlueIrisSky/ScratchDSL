@@ -326,13 +326,10 @@ mod tests {
         将 (1) 加入 (then_missing)
     else:
         将 (2) 加入 (else_missing)
-    end
     value = @outside
-end
 start:
     第二处未知积木
     移动 (1) 步
-end
 "#,
         );
         let errors = diagnose_project(&project, &Registry::new());
@@ -362,10 +359,8 @@ end
     implicit = (@first + @second)
     if <@n>:
         pass
-    end
-    等待 (@ok) 秒
+    sleep (@ok)
     将 (1) 加入 (missing)
-end
 "#,
         );
         let errors = messages(&project);
@@ -393,7 +388,7 @@ end
 
     #[test]
     fn target_errors_survive_reference_errors_in_the_same_call() {
-        let project = load("start:\n    移动 (@missing) 步\nend");
+        let project = load("start:\n    移动 (@missing) 步\n");
         let errors = messages(&project);
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(
@@ -410,23 +405,17 @@ end
             r#"def 甲:
     乙
     移动 (1) 步
-end
 def 乙:
     甲
     x = (x 坐标)
-end
 start:
     甲
     甲
-end
 sprite "玩家":
     init:
         pass
-    end
     start:
         乙
-    end
-end
 "#,
         );
         let errors = messages(&project);
@@ -450,27 +439,20 @@ end
 def 甲:
     将 (1) 加入 (logs)
     乙
-end
 def 乙:
     甲
-end
 def 未调用的移动:
     移动 (1) 步
-end
 sprite "玩家":
     init:
         pass
-    end
     local = {}
     def 甲:
         将 (2) 加入 (local)
-    end
     start:
         甲
         乙
         implicit = 1
-    end
-end
 "#,
         );
         let registry = Registry::new();
@@ -498,13 +480,10 @@ end
         let mut project = load(
             r#"def 同名 @first:
     将 (1) 加入 (one)
-end
 def 另一名称 @second:
     将 (2) 加入 (two)
-end
 def 后续:
     将 (3) 加入 (three)
-end
 "#,
         );
         // IDs and slots normally come from the loader. Exercise a partially
@@ -530,24 +509,17 @@ end
     fn private_procedures_are_checked_even_when_unused() {
         let project = load(
             r#"def 公共:
-    等待 (1) 秒
-end
+    sleep (1)
 sprite "玩家":
     init:
         pass
-    end
     def 私有:
         公共
-    end
-end
 sprite "另一角色":
     init:
         pass
-    end
     def 私有:
         公共
-    end
-end
 "#,
         );
         let mut registry = Registry::new();

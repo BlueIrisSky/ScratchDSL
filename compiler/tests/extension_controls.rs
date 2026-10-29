@@ -90,7 +90,7 @@ fn extension_control_inputs_branches_and_procedure_dependencies_are_mapped() {
 #[test]
 fn display_text_arrays_and_empty_branches_compile() {
     let project = compile(
-        "start:\n    flow.选择 (2) 第二 (\"label\") 第三 (5) 结束 (\"footer\"):\n        pass\n    else:\n        flow.执行 (2) 次:\n            pass\n        end\n    else:\n        pass\n    end\nend\n",
+        "start:\n    flow.选择 (2) 第二 (\"label\") 第三 (5) 结束 (\"footer\"):\n        pass\n    else:\n        flow.执行 (2) 次:\n            pass\n    else:\n        pass\n",
     )
     .unwrap();
     let blocks = project.json["targets"][0]["blocks"].as_object().unwrap();
@@ -117,14 +117,13 @@ fn control_shapes_and_branch_counts_are_checked() {
     ] {
         assert!(compile(source).is_err(), "{source}");
     }
-    let error =
-        compile("start:\n    flow.执行 (1) 次:\n        移动 (1) 步\n    end\nend\n").unwrap_err();
+    let error = compile("start:\n    flow.执行 (1) 次:\n        移动 (1) 步\n").unwrap_err();
     assert!(error.0.contains("舞台不支持"), "{error}");
 }
 
 #[test]
 fn diagnostics_check_every_extension_branch_and_clear_after_repair() {
-    let source = "start:\n    flow.如果 <true> 否则 (1):\n        删除 (missing) 的全部项目\n    else:\n        显示变量 (@missing)\n    else:\n        移动 (1) 步\n    end\nend\n";
+    let source = "start:\n    flow.如果 <true> 否则 (1):\n        删除 (missing) 的全部项目\n    else:\n        显示变量 (@missing)\n    else:\n        移动 (1) 步\n";
     let directory = setup(source);
     let path = directory.path().join("main.sbdsl");
     let mut overlays = BTreeMap::from([(path.clone(), source.into())]);
@@ -157,7 +156,7 @@ fn diagnostics_check_every_extension_branch_and_clear_after_repair() {
     }
     overlays.insert(
         path.clone(),
-        "start:\n    flow.如果 <true> 否则 (1):\n        pass\n    else:\n        pass\n    end\nend\n".into(),
+        "start:\n    flow.如果 <true> 否则 (1):\n        pass\n    else:\n        pass\n".into(),
     );
     let fixed = analyze_document(&path, &overlays, &mut cache, true);
     assert!(fixed.diagnostics.is_empty(), "{:?}", fixed.diagnostics);

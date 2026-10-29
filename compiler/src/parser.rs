@@ -1034,7 +1034,7 @@ fn statement_boundary_after(source: &str, start: usize, end: usize) -> bool {
         .next()
         .unwrap_or("")
         .trim_end();
-    if line.starts_with('[') || matches!(line, "pass" | "end") || assignment_parts(line).is_some() {
+    if line.starts_with('[') || line == "pass" || assignment_parts(line).is_some() {
         return true;
     }
     let header = line.strip_suffix(':').map_or(line, str::trim_end);
@@ -1234,7 +1234,6 @@ fn infix_right_end(
     if source[end..right_start].contains(['\n', '\r'])
         && [
             "sprite", "stage", "var", "list", "global", "init", "piece", "def", "start", "import",
-            "end",
         ]
         .iter()
         .any(|keyword| starts_keyword(&source[right_start..], keyword))
@@ -1427,7 +1426,7 @@ mod tests {
             assert_eq!(parse_menu(&format_menu(value)).unwrap(), value);
         }
         assert_eq!(format_menu("空格"), "'空格'");
-        let text = "start:\n 选择 'a#b/}<>;'\n 等待 (8 / 2) 秒 # comment\nend\n";
+        let text = "start:\n 选择 'a#b/}<>;'\n sleep(8 / 2) # comment\n";
         let cleaned = strip_comments(text).unwrap();
         assert!(cleaned.contains("'a#b/}<>;'"));
         assert!(!cleaned.contains("# comment"));
@@ -1559,7 +1558,7 @@ mod tests {
 
     #[test]
     fn comments_preserve_locations_and_literal_contents() {
-        let text = "# line\n# inline #\n#\n跨行\n#\nstart:\n 说 (\"#not comment\") # tail\n 移到 ('a#b')\nend\n";
+        let text = "# line\n# inline #\n#\n跨行\n#\nstart:\n 说 (\"#not comment\") # tail\n 移到 ('a#b')\n";
         let stripped = strip_comments(text).unwrap();
         assert_eq!(stripped.len(), text.len());
         assert_eq!(stripped.matches('\n').count(), text.matches('\n').count());
@@ -1615,7 +1614,7 @@ mod tests {
 
     #[test]
     fn bare_namespace_commands_are_structural_in_strict_and_recovering_parsers() {
-        let source = "sprite \"测试\":\n    init:\n        pass\n    end\n    start:\n        scratch-tensor-extension.记录 (自定义拓展.min.值)\n        自定义拓展.min::\"run\"((1))\n    end\n    自定义拓展.min.完成 \"ok\":\n        说 (\"ok\")\n    end\nend\n";
+        let source = "sprite \"测试\":\n    init:\n        pass\n    start:\n        scratch-tensor-extension.记录 (自定义拓展.min.值)\n        自定义拓展.min::\"run\"((1))\n    自定义拓展.min.完成 \"ok\":\n        说 (\"ok\")\n";
         let strict = parse(Path::new("test.sbdsl"), source).unwrap();
         let recovering = parse_recovering(Path::new("test.sbdsl"), source);
         assert!(recovering.errors.is_empty(), "{:?}", recovering.errors);
@@ -1680,7 +1679,7 @@ mod tests {
 
     #[test]
     fn operators_keep_nested_templates_commands_and_following_declarations() {
-        let text = "start:\n 说 (<1 > 0>)\n 等待 (8 / 4 / 2) 秒\n ext::\"call\"(<@ok>, (1), '*', <hp < 1>)\n 说 <ext.模板 <@ok> (1)>\nend\nafter = 1\nimport next\n";
+        let text = "start:\n 说 (<1 > 0>)\n sleep(8 / 4 / 2)\n ext::\"call\"(<@ok>, (1), '*', <hp < 1>)\n 说 <ext.模板 <@ok> (1)>\nafter = 1\nimport next\n";
         let parsed = source(text).unwrap();
         let Item::Script { body, .. } = &parsed[0] else {
             panic!()
@@ -1697,7 +1696,7 @@ mod tests {
 
     #[test]
     fn parses_declarations_initializers_stage_and_sprite_add() {
-        let items = source("import utils.math\na_b = -.5\nitems = {1, \"two\", 1e-5}\nstage:\n    score = 0\nend\nsprite \"玩家\":\n    init:\n        pass\n    end\n    global:全局列表 = {}\n    hp = 100\nend\nsprite \"玩家\" add:\n    pass\nend\n").unwrap();
+        let items = source("import utils.math\na_b = -.5\nitems = {1, \"two\", 1e-5}\nstage:\n    score = 0\nsprite \"玩家\":\n    init:\n        pass\n    global:全局列表 = {}\n    hp = 100\nsprite \"玩家\" add:\n    pass\n").unwrap();
         assert_eq!(items.len(), 6);
         let Item::Data { name, value, .. } = &items[1] else {
             panic!()
@@ -1720,7 +1719,7 @@ mod tests {
 
     #[test]
     fn control_and_else_keep_headers_and_nested_statements() {
-        let items = source("def 受伤 值: @n @warp:\n    if <hp < @n>:\n        说 (\"a\")\n    else:\n        loop 2:\n            移动 (8 / 2) 步\n        end\n    end\nend\nsprite \"玩家\":\n    init:\n        pass\n    end\n    start:\n        受伤 值: (3)\n    end\nend\n").unwrap();
+        let items = source("def 受伤 值: @n @warp:\n    if <hp < @n>:\n        说 (\"a\")\n    else:\n        loop 2:\n            移动 (8 / 2) 步\nsprite \"玩家\":\n    init:\n        pass\n    start:\n        受伤 值: (3)\n").unwrap();
         let Item::Procedure { header, body, .. } = &items[0] else {
             panic!()
         };
@@ -1752,17 +1751,15 @@ mod tests {
             assert!(source(invalid).is_err(), "{invalid}");
         }
         assert!(
-            source(
-                "sprite \"a\":\n    init:\n        pass\n    end\n    start:\n        移动 (1) 步\n    end\nend"
-            )
-            .is_ok()
+            source("sprite \"a\":\n    init:\n        pass\n    start:\n        移动 (1) 步")
+                .is_ok()
         );
-        assert!(source("stage:\n    import utils.math\n    sprite \"a\":\n        init:\n            pass\n        end\n    end\nend\n").is_ok());
+        assert!(source("stage:\n    import utils.math\n    sprite \"a\":\n        init:\n            pass\n").is_ok());
     }
 
     #[test]
     fn header_first_slot_and_explicit_commands_are_structural() {
-        let items = source("sprite \"a\":\n    init:\n        pass\n    end\n    ext.(x 坐标) 达标:\n        ext::\"send\"((1), 'a/b', <true>)\n    end\n    ext::\"event\"('space'):\n        说 (\"x\")\n    end\nend\n").unwrap();
+        let items = source("sprite \"a\":\n    init:\n        pass\n    ext.(x 坐标) 达标:\n        ext::\"send\"((1), 'a/b', <true>)\n    ext::\"event\"('space'):\n        说 (\"x\")\n").unwrap();
         let Item::Sprite { items, .. } = &items[0] else {
             panic!()
         };
@@ -1791,12 +1788,9 @@ mod tests {
             "bitmapResolution": 2
         }],
         "sounds": [{"name": "音效", "path": "../assets/sound.wav"}]
-    end
     hp = 100
-end
 sprite "玩家" add:
     hp = 50
-end
 "##;
         let cleaned = strip_comments(text).unwrap();
         assert_eq!(cleaned.len(), text.len());
@@ -1822,7 +1816,7 @@ end
         let Item::Data { span, .. } = &body[0] else {
             panic!()
         };
-        assert_eq!((span.line, span.column), (18, 5));
+        assert_eq!((span.line, span.column), (17, 5));
         assert!(matches!(
             &items[1],
             Item::Sprite {
@@ -1832,7 +1826,7 @@ end
             }
         ));
 
-        let defaults = source("sprite \"a\":\n    init:\n        pass\n    end\nend").unwrap();
+        let defaults = source("sprite \"a\":\n    init:\n        pass").unwrap();
         let Item::Sprite {
             init: Some(init),
             items,
@@ -1868,7 +1862,7 @@ end
         ] {
             assert!(source(invalid).is_err(), "{invalid}");
         }
-        assert!(source("sprite \"a\" add:\n    pass\nend").is_ok());
+        assert!(source("sprite \"a\" add:\n    pass").is_ok());
     }
 
     #[test]
@@ -1886,13 +1880,10 @@ end
     rotationCenterX: 12.5
    }
   ]
- end
  hp = 100
  start:
   hp = (
    100)
- end
-end
 "##;
         let items = source(text).unwrap();
         let Item::Sprite {
@@ -1921,8 +1912,7 @@ end
 
     #[test]
     fn init_notation_errors_keep_original_spans_and_recovery_children() {
-        let text =
-            "sprite \"角色 😀\":\n init:\n  x: 1\n  x: 2\n end\n hp = 100\nend\nimport next\n";
+        let text = "sprite \"角色 😀\":\n init:\n  x: 1\n  x: 2\n hp = 100\nimport next\n";
         let error = source(text).unwrap_err();
         assert!(error.0.contains("duplicate field"));
         assert_eq!(
@@ -2013,9 +2003,8 @@ end
         ] {
             assert!(source(invalid).is_err(), "{invalid}");
         }
-        assert!(source("def p @init:\n    移到 ('#')\nend").is_ok());
-        let error =
-            source("sprite \"a\":\n init:\n  #中文注释\n  \"x\": null\n end\nend\n").unwrap_err();
+        assert!(source("def p @init:\n    移到 ('#')").is_ok());
+        let error = source("sprite \"a\":\n init:\n  #中文注释\n  \"x\": null\n").unwrap_err();
         assert!(error.to_string().starts_with("test.sbdsl:4:"), "{error}");
         for invalid in [
             "sprite \"a\":\n    init:\n        rotationStyle: \"a\nb\"",
@@ -2028,7 +2017,7 @@ end
 
     #[test]
     fn multiline_expressions_and_comment_columns_use_original_text() {
-        let items = source("start:\n #中文# 说(连接\n (\"a\") 和 (\"b\"))\nend\n").unwrap();
+        let items = source("start:\n #中文# 说(连接\n (\"a\") 和 (\"b\"))\n").unwrap();
         let Item::Script { body, .. } = &items[0] else {
             panic!()
         };
@@ -2037,8 +2026,7 @@ end
         };
         assert_eq!((span.line, span.column), (2, 7));
         assert!(source.contains('\n'));
-        let error =
-            super::parse(Path::new("例子.sbdsl"), "\nstart:\n 说 (\"\\q\")\nend").unwrap_err();
+        let error = super::parse(Path::new("例子.sbdsl"), "\nstart:\n 说 (\"\\q\")").unwrap_err();
         assert!(error.to_string().starts_with("例子.sbdsl:3:"));
     }
 }

@@ -139,9 +139,9 @@ pub fn complete_with_symbols(
                                     template.slots().count() + branch + 1
                                 ));
                             }
-                            snippet.push_str(&format!("\n{indent}end$0"));
+                            snippet.push_str("$0");
                         } else {
-                            snippet.push_str(&format!(":\n{indent}    $0\n{indent}end"));
+                            snippet.push_str(&format!(":\n{indent}    ${{0:pass}}"));
                         }
                     }
                 } else {
@@ -174,7 +174,7 @@ pub fn complete_with_symbols(
                 let snippet = if source[cursor..].trim_start().starts_with(':') {
                     "else".into()
                 } else {
-                    format!("else:\n{indent}    $0")
+                    format!("else:\n{indent}    ${{0:pass}}")
                 };
                 result.push(item(
                     source,
@@ -1975,10 +1975,10 @@ mod tests {
 
     #[test]
     fn python_style_bodies_complete_with_colons_and_indentation() {
-        assert_eq!(choose("sta|", "event_whenflagclicked"), "start:\n    \nend");
+        assert_eq!(choose("sta|", "event_whenflagclicked"), "start:\n    pass");
         assert_eq!(
             choose("start:\n    i|", "control_if"),
-            "start:\n    if <>:\n        \n    end"
+            "start:\n    if <>:\n        pass"
         );
         assert_eq!(
             choose("start:\n    loo|:\n        pass", "control_repeat"),
@@ -1986,15 +1986,15 @@ mod tests {
         );
         assert_eq!(
             choose("start:\n    wh|", "control_while"),
-            "start:\n    while <>:\n        \n    end"
+            "start:\n    while <>:\n        pass"
         );
         assert_eq!(
             choose("start:\n    while t|", "control_forever"),
-            "start:\n    while true:\n        \n    end"
+            "start:\n    while true:\n        pass"
         );
         assert_eq!(
             choose("\"自定义拓展\".当完成:\n    loo|", "control_repeat"),
-            "\"自定义拓展\".当完成:\n    loop 0:\n        \n    end"
+            "\"自定义拓展\".当完成:\n    loop 0:\n        pass"
         );
         let (source, cursor) = marked("start:\n    if <true>:\n        pass\n    el|");
         let items = complete(&source, cursor, &Registry::new());
@@ -2002,12 +2002,31 @@ mod tests {
         let otherwise = items.iter().find(|item| item.label == "else").unwrap();
         assert_eq!(
             apply(&source, otherwise),
-            "start:\n    if <true>:\n        pass\n    else:\n        "
+            "start:\n    if <true>:\n        pass\n    else:\n        pass"
         );
         let (source, cursor) = marked("|");
         let items = complete(&source, cursor, &Registry::new());
         assert!(items.iter().any(|item| item.label == "start"));
         assert!(!items.iter().any(|item| item.label == "当绿旗被点击"));
+    }
+
+    #[test]
+    fn completed_suites_compile_with_pass_and_no_terminators() {
+        for (source, opcode) in [
+            ("sta|", "event_whenflagclicked"),
+            ("start:\n    i|", "control_if"),
+            ("start:\n    loo|", "control_repeat"),
+            ("start:\n    wh|", "control_while"),
+            ("start:\n    while t|", "control_forever"),
+        ] {
+            let completed = choose(source, opcode);
+            assert!(!completed.lines().any(|line| line.trim() == "end"));
+            compile_source(&completed);
+        }
+        let (source, cursor) = marked("start:\n    if <true>:\n        pass\n    el|");
+        let items = complete(&source, cursor, &Registry::new());
+        let otherwise = items.iter().find(|item| item.label == "else").unwrap();
+        compile_source(&apply(&source, otherwise));
     }
 
     #[test]
@@ -2059,7 +2078,7 @@ mod tests {
             assert!(items.is_empty(), "{mark}");
         }
         let (source, cursor) = marked(
-            "sprite \"玩家\":\n    score = 0\n    def 等待 @seconds:\n        等待 (@sec|) 秒\n    start:\n        pass",
+            "sprite \"玩家\":\n    score = 0\n    def 等待 @seconds:\n        sleep(@sec|)\n    start:\n        pass",
         );
         let items = complete(&source, cursor, &Registry::new());
         assert_eq!(items.len(), 1);
@@ -2071,7 +2090,7 @@ mod tests {
         let completed = choose("start:\n    说(连|)", "operator_join");
         assert_eq!(completed, "start:\n    说(连接(\"\")和(\"\"))");
         compile_source(&format!(
-            "sprite \"玩家\":\n    init:\n        pass\n    end\n{}\n    end\nend",
+            "sprite \"玩家\":\n    init:\n        pass\n{}",
             completed
                 .lines()
                 .map(|line| format!("    {line}"))
@@ -2079,8 +2098,8 @@ mod tests {
                 .join("\n")
         ));
         assert_eq!(
-            choose("start:\n    等待|", "control_wait"),
-            "start:\n    等待(0)秒"
+            choose("start:\n    sle|", "control_wait"),
+            "start:\n    sleep(0)"
         );
         for mark in [
             "start:\n    [移|]",
@@ -2099,9 +2118,38 @@ mod tests {
     }
 
     #[test]
+    fn sleep_completes_seconds_and_retires_the_old_wait_spelling() {
+        let completed = choose("start:\n    sle|", "control_wait");
+        assert_eq!(completed, "start:\n    sleep(0)");
+        compile_source(&completed);
+
+        let (source, cursor) = marked("seconds = 1\nstart:\n    sleep(sec|)");
+        let items = complete(&source, cursor, &Registry::new());
+        let seconds = items.iter().find(|item| item.label == "seconds").unwrap();
+        assert_eq!(
+            apply(&source, seconds),
+            "seconds = 1\nstart:\n    sleep(seconds)"
+        );
+        compile_source(&apply(&source, seconds));
+
+        let (source, cursor) = marked("start:\n    等待|");
+        let items = complete(&source, cursor, &Registry::new());
+        assert!(
+            !items
+                .iter()
+                .any(|item| item.detail.as_deref() == Some("control_wait · Command"))
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item.detail.as_deref() == Some("control_wait_until · Command"))
+        );
+    }
+
+    #[test]
     fn incomplete_chinese_command_applies_and_compiles() {
         let source = choose(
-            "sprite \"玩家\" :\n    init :\n        pass\n    end\n    start :\n        移|\n    end\nend",
+            "sprite \"玩家\" :\n    init :\n        pass\n    start :\n        移|",
             "motion_movesteps",
         );
         assert!(source.contains("移动(0)步"));
@@ -2280,23 +2328,21 @@ mod tests {
     fn init_keys_enums_and_existing_quotes() {
         let registry = Registry::new();
         for marked_source in [
-            "sprite \"玩家\" :\n    init :\n        |\n    end\nend",
-            "sprite \"玩家\" :\n    init :\n        \"rot|\"\n    end\nend",
+            "sprite \"玩家\" :\n    init :\n        |",
+            "sprite \"玩家\" :\n    init :\n        \"rot|\"",
         ] {
             let (source, cursor) = marked(marked_source);
             let items = complete(&source, cursor, &registry);
             let selected = items.iter().find(|i| i.label == "rotationStyle").unwrap();
             compile_source(&apply(&source, selected));
         }
-        let (source, cursor) = marked(
-            "sprite \"玩家\" :\n    init :\n        \"rotationStyle\": \"le|\"\n    end\nend",
-        );
+        let (source, cursor) =
+            marked("sprite \"玩家\" :\n    init :\n        \"rotationStyle\": \"le|\"");
         let items = complete(&source, cursor, &registry);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "left-right");
         compile_source(&apply(&source, &items[0]));
-        let (source, cursor) =
-            marked("sprite \"玩家\" :\n    init :\n        \"visible\": f|\n    end\nend");
+        let (source, cursor) = marked("sprite \"玩家\" :\n    init :\n        \"visible\": f|");
         let items = complete(&source, cursor, &registry);
         assert_eq!(items[0].label, "false");
         compile_source(&apply(&source, &items[0]));
@@ -2326,10 +2372,10 @@ mod tests {
     #[test]
     fn bare_init_fields_complete_after_newlines_without_adding_quotes() {
         for marked_source in [
-            "sprite \"玩家\" :\n    init :\n        rot|\n    end\nend",
-            "sprite \"玩家\" :\n    init :\n        x: 1\n        rot|\n    end\nend",
-            "sprite \"玩家\" :\n    init :\n        x: 1 # 坐标\n        rot|\n    end\nend",
-            "sprite \"玩家\" :\n    init :\n        x: 1\n        #\n        注释\n        #\n        rot|\n    end\nend",
+            "sprite \"玩家\" :\n    init :\n        rot|",
+            "sprite \"玩家\" :\n    init :\n        x: 1\n        rot|",
+            "sprite \"玩家\" :\n    init :\n        x: 1 # 坐标\n        rot|",
+            "sprite \"玩家\" :\n    init :\n        x: 1\n        #\n        注释\n        #\n        rot|",
         ] {
             let (source, cursor) = marked(marked_source);
             let items = complete(&source, cursor, &Registry::new());
@@ -2664,10 +2710,11 @@ mod tests {
             assert_eq!(items.len(), 1, "{items:?}");
             let applied = apply(&source, &items[0]);
             let expected = format!(
-                "start:\n    \"分支 扩展😀\".分支(3)记录(logs):\n        pass{}\n    end",
+                "start:\n    \"分支 扩展😀\".分支(3)记录(logs):\n        pass{}",
                 "\n    else:\n        pass".repeat(branches - 1)
             );
             assert_eq!(applied, expected);
+            crate::parser::parse(std::path::Path::new("completion.sbdsl"), &applied).unwrap();
             let header = applied.lines().nth(1).unwrap().trim().trim_end_matches(':');
             let call = registry
                 .parse_typed(
@@ -2720,7 +2767,7 @@ mod tests {
             let applied = apply(&source, item);
             assert!(applied.contains("::\"choose"), "{applied}");
             assert!(
-                applied.ends_with(":\n        pass\n    else:\n        pass\n    end"),
+                applied.ends_with(":\n        pass\n    else:\n        pass"),
                 "{applied}"
             );
             let header = applied.lines().nth(1).unwrap().trim().trim_end_matches(':');
@@ -3059,7 +3106,7 @@ mod tests {
                 }),
                 "{applied}"
             );
-            compile_source(&format!("变量 = 0\n{applied}\nend"));
+            compile_source(&format!("变量 = 0\n{applied}"));
         }
         let (source, cursor) = marked("start:\n    [|]");
         let items = complete(&source, cursor, &Registry::new());
@@ -3479,7 +3526,7 @@ mod tests {
         assert_eq!(call.template.procedure, procedure.procedure);
         assert!(text.contains("条件:<>"));
         compile_source(&format!(
-            "def 测试 步数: @steps 条件: <@enabled> 内容: @text :\n    等待 (@steps) 秒\nend\nstart :\n    {text}\nend"
+            "def 测试 步数: @steps 条件: <@enabled> 内容: @text :\n    sleep(@steps)\nstart :\n    {text}"
         ));
     }
 
@@ -3527,15 +3574,13 @@ mod tests {
     #[test]
     fn document_wrapper_collects_declarations_even_with_incomplete_calls() {
         let registry = Registry::new();
-        let (source, cursor) = marked(
-            "score = 0\ndef 等一等 @seconds :\n    等待 (@sec|) 秒\nend\nstart :\n    等一\nend",
-        );
+        let (source, cursor) =
+            marked("score = 0\ndef 等一等 @seconds :\n    sleep(@sec|)\nstart :\n    等一");
         let items = complete(&source, cursor, &registry);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "@seconds");
-        let (source, cursor) = marked(
-            "score = 0\ndef 等一等 @seconds :\n    等待 (@seconds) 秒\nend\nstart :\n    等一|\nend",
-        );
+        let (source, cursor) =
+            marked("score = 0\ndef 等一等 @seconds :\n    sleep(@seconds)\nstart :\n    等一|");
         let items = complete(&source, cursor, &registry);
         assert_eq!(items.len(), 1);
         let applied = apply(&source, &items[0]);

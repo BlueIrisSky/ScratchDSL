@@ -51,7 +51,7 @@
 | `当收到广播 "BROADCAST_OPTION"` | `event_whenbroadcastreceived` |
 | `广播 (BROADCAST_INPUT)` | `event_broadcast` |
 | `广播 (BROADCAST_INPUT) 并等待` | `event_broadcastandwait` |
-| `等待 (DURATION) 秒` | `control_wait` |
+| `sleep (DURATION)` | `control_wait` |
 | `等待直到 <CONDITION>` | `control_wait_until` |
 | `停止 'STOP_OPTION'` | `control_stop` |
 | `当作为克隆体启动时` | `control_start_as_clone` |

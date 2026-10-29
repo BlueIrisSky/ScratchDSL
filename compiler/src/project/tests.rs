@@ -16,19 +16,14 @@ import module
 score = 3
 stage:
     start:
-        等待 (1) 秒
-    end
-end
+        sleep (1)
 sprite "玩家" add:
     hp = 9
     global:shared = 4
     def 动作 @private:
         pass
-    end
     start:
         移动 (2) 步
-    end
-end
 "#
             .into(),
         ),
@@ -40,20 +35,15 @@ shared = 2
 logs = {"module"}
 def 动作 @public:
     pass
-end
 start:
     不存在的舞台脚本
-end
 sprite "玩家":
     init:
         "x":5,"costumes":[{"name":"造型","path":"cat.svg"}]
-    end
     hp = 5
     bag = {1}
     start:
         移动 (1) 步
-    end
-end
 "#
             .into(),
         ),
@@ -151,40 +141,28 @@ fn bad_declarations_do_not_leak_private_contents_or_stop_siblings() {
     let source = r#"sprite "玩家":
     init:
         pass
-    end
     def 动作 @one:
         pass
-    end
     def 动作 @two:
         pass
-    end
     hp = 3
-end
 sprite "玩家":
     init:
         pass
-    end
     leaked = 1
     global:leaked_global = 1
     def 不应存在:
         pass
-    end
-end
 sprite "未创建" add:
     leaked_list = {}
     def 也不应存在:
         pass
-    end
-end
 def 坏定义 @x @x:
     pass
-end
 def 动作 @first:
     pass
-end
 def 动作 @second:
     pass
-end
 final = 4
 "#;
     let provider = OverlaySource::new(&BTreeMap::from([(main.clone(), source.into())]));
@@ -214,15 +192,11 @@ fn broken_init_keeps_role_scope_without_duplicate_init_errors() {
     let source = r#"sprite "玩家":
     init:
         "size":-1
-    end
     hp = 3
     def 私有动作:
         pass
-    end
     start:
         移动 (1) 步
-    end
-end
 final = 4
 "#;
     let provider = OverlaySource::new(&BTreeMap::from([(main.clone(), source.into())]));

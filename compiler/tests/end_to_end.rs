@@ -130,7 +130,6 @@ score = 101
 sprite "运算":
     init:
         pass
-    end
     start:
         说 (1 + 2)
         说 (1 - 2)
@@ -139,23 +138,17 @@ sprite "运算":
         说 (7 % 3)
         if <hp < 1>:
             说 ("低血量")
-        end
         if <score > 100>:
             说 ("高分")
-        end
         if <score = 100>:
             说 ("满分")
-        end
         说 (1+(2*3))
         说 (1e-5--2)
         说 (8 /
             (6 / 2))
         if <<hp < 2> and <score>100>>:
             score = (score - 1)
-        end
         说 ("后续命令")
-    end
-end
 "#,
     )
     .unwrap();
@@ -196,7 +189,7 @@ end
 #[test]
 fn import_order_overwrite_cycle_and_discarded_stage_scripts() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("A.sbdsl"),"import B\nscore = 1\nlogs = {\"A\"}\nstart:\n    说 (not_created)\nend\nsprite \"玩家\":\n    init:\n        pass\n    end\n    start:\n        score += 1\n    end\nend\n").unwrap();
+    fs::write(dir.path().join("A.sbdsl"),"import B\nscore = 1\nlogs = {\"A\"}\nstart:\n    说 (not_created)\nsprite \"玩家\":\n    init:\n        pass\n    start:\n        score += 1\n").unwrap();
     fs::write(
         dir.path().join("B.sbdsl"),
         "import main\nscore = 2\nlogs = {\"B\", 3}\n",
@@ -204,7 +197,7 @@ fn import_order_overwrite_cycle_and_discarded_stage_scripts() {
     .unwrap();
     let p = compile(
         dir.path(),
-        "import A\nimport B\nsprite \"玩家\" add:\n    当按下 'space' 键:\n        移动 (1) 步\n    end\nend\n",
+        "import A\nimport B\nsprite \"玩家\" add:\n    当按下 'space' 键:\n        移动 (1) 步\n",
     )
     .unwrap();
     let stage = &p.json["targets"][0];
@@ -224,7 +217,7 @@ fn add_never_creates_a_sprite() {
     let dir = tempfile::tempdir().unwrap();
     let err = compile(
         dir.path(),
-        "sprite \"玩家\" add:\n    pass\nend\nsprite \"玩家\":\n    init:\n        pass\n    end\nend\n",
+        "sprite \"玩家\" add:\n    pass\nsprite \"玩家\":\n    init:\n        pass\n",
     )
     .unwrap_err();
     assert!(err.to_string().contains("add"));
@@ -243,7 +236,6 @@ fn comments_menus_and_division_are_distinct() {
 sprite "玩家":
     init:
         pass
-    end
     当按下 'space' 键:
         说 ("# / 不变") # 行尾
         hp = (8 / 2)
@@ -251,9 +243,6 @@ sprite "玩家":
             说 ("好")
         else:
             说 ("否")
-        end
-    end
-end
 "##,
     )
     .unwrap();
@@ -271,18 +260,14 @@ fn public_body_keeps_global_binding_inside_private_scope() {
         r#"score = 1
 def 增加分数 数量: @n @warp:
     score += @n
-end
 sprite "玩家":
     init:
         pass
-    end
     score = 100
     start:
         增加分数 数量: (2)
         score += 3
         global:score += 4
-    end
-end
 "#,
     )
     .unwrap();
@@ -421,7 +406,7 @@ fn extension_aliases_change_source_names_without_changing_runtime_identity() {
         "\"自定义拓展\"::\"move\"((20))",
     ] {
         let source = format!(
-            "sprite \"玩家\":\n    init:\n        pass\n    end\n    start:\n        {invocation}\n    end\nend\n"
+            "sprite \"玩家\":\n    init:\n        pass\n    start:\n        {invocation}\n"
         );
         assert!(compile(directory.path(), &source).is_err(), "{invocation}");
     }
@@ -469,9 +454,9 @@ fn rejects_unresolved_lists_bad_parameters_and_stage_motion() {
     let dir = tempfile::tempdir().unwrap();
     for source in [
         "start:\n    删除 (missing) 的全部项目",
-        "def 测试:\n    等待 (@unknown) 秒",
+        "def 测试:\n    sleep (@unknown)",
         "def 测试:\n    移动 (1) 步\nstart:\n    测试",
-        "start:\n    等待 ((1) + * (3)) 秒\n",
+        "start:\n    sleep ((1) + * (3))\n",
     ] {
         assert!(
             compile(dir.path(), source).is_err(),
@@ -510,8 +495,6 @@ fn packs_stage_config_assets_and_sprite_source_assets_with_real_metadata() {
         "rotationStyle": "left-right",
         "costumes": [{"name": "造型", "path": "assets/player.png"}],
         "sounds": [{"name": "音效", "path": "assets/tone.wav"}]
-    end
-end
 "#;
     let p = compile(dir.path(), source).unwrap();
     let target = &p.json["targets"][1];
@@ -544,13 +527,9 @@ fn sprite_init_sets_static_state_without_initialization_scripts() {
         "direction": -90,
         "visible": false,
         "rotationStyle": "don't rotate"
-    end
-end
 sprite "默认":
     init:
         pass
-    end
-end
 "#,
     )
     .unwrap();
@@ -597,8 +576,6 @@ fn imported_sprite_assets_resolve_from_the_declaring_module() {
     init:
         "costumes": [{"name": "模块造型", "path": "assets/player.svg"}],
         "sounds": [{"name": "模块声音", "path": "assets/tone.wav"}]
-    end
-end
 "#,
     )
     .unwrap();
@@ -623,12 +600,12 @@ fn sprite_add_preserves_init_and_duplicate_creation_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("player.sbdsl"),
-        "sprite \"玩家\":\n    init:\n        \"x\":42,\"size\":80,\"visible\":false\n    end\nend\n",
+        "sprite \"玩家\":\n    init:\n        \"x\":42,\"size\":80,\"visible\":false\n",
     )
     .unwrap();
     let p = compile(
         dir.path(),
-        "import player\nsprite \"玩家\" add:\n    start:\n        移动 (1) 步\n    end\nend\n",
+        "import player\nsprite \"玩家\" add:\n    start:\n        移动 (1) 步\n",
     )
     .unwrap();
     assert_eq!(p.json["targets"].as_array().unwrap().len(), 2);
@@ -639,8 +616,8 @@ fn sprite_add_preserves_init_and_duplicate_creation_is_rejected() {
     assert_eq!(target["blocks"].as_object().unwrap().len(), 2);
     assert_graph(&p.json);
     for source in [
-        "import player\nsprite \"玩家\":\n    init:\n        pass\n    end\nend\n",
-        "sprite \"玩家\":\n    init:\n        pass\n    end\nend\nsprite \"玩家\":\n    init:\n        pass\n    end\nend\n",
+        "import player\nsprite \"玩家\":\n    init:\n        pass\n",
+        "sprite \"玩家\":\n    init:\n        pass\nsprite \"玩家\":\n    init:\n        pass\n",
     ] {
         let error = compile(dir.path(), source).unwrap_err().to_string();
         assert!(error.contains("玩家"), "{error}");
@@ -697,8 +674,6 @@ fn costume_order_is_preserved_and_names_are_unique_per_asset_kind() {
     init:
         "costumes": [{"name":"第二","path":"b.svg"},{"name":"第一","path":"a.svg"}],
         "sounds": [{"name":"第二","path":"tone.wav"}]
-    end
-end
 "#,
     )
     .unwrap();

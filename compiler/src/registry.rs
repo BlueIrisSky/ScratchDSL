@@ -1193,6 +1193,37 @@ pub fn procedure_template(header: &str, id: &str) -> Result<Template> {
 mod tests {
     use super::*;
     #[test]
+    fn sleep_maps_seconds_to_duration_and_rejects_the_old_wait_spelling() {
+        let registry = Registry::new();
+        for source in ["sleep(1.25)", "sleep (1.25)"] {
+            let call = registry.parse(source, Shape::Command, &[]).unwrap();
+            assert_eq!(call.template.opcode, "control_wait");
+            let slots: Vec<_> = call.template.slots().collect();
+            assert_eq!(slots.len(), 1);
+            assert_eq!(slots[0].name, "DURATION");
+            assert!(matches!(call.args.as_slice(), [Expr::Number(value)] if *value == 1.25));
+        }
+        let call = registry.parse("sleep(1+2)", Shape::Command, &[]).unwrap();
+        assert!(
+            matches!(&call.args[0], Expr::Call(value) if value.template.opcode == "operator_add")
+        );
+        for source in ["等待 (1) 秒", "等待(1)秒", "sleep(1) 秒", "sleep 1"] {
+            assert!(
+                registry.parse(source, Shape::Command, &[]).is_err(),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            registry
+                .parse("等待直到 <>", Shape::Command, &[])
+                .unwrap()
+                .template
+                .opcode,
+            "control_wait_until"
+        );
+    }
+
+    #[test]
     fn nested_values_and_boolean_types() {
         let r = Registry::new();
         let call = r.parse("score = 1 + 2 * 3", Shape::Command, &[]).unwrap();

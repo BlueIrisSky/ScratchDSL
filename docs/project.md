@@ -141,8 +141,6 @@ import entities
 sprite "玩家" add:
     当按下 'space' 键:
         说("释放技能")
-    end
-end
 ```
 
 这里要求 `entities` 已经创建“玩家”。处理 `add` 时角色尚不存在就报错，后面的定义不能补救。追加体不能写 `init`，也不能修改角色初始状态或资源。

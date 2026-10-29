@@ -84,9 +84,14 @@ try {
         throw 'VSIX version or target platform mismatch'
     }
     if ($packagedManifest.license -cne 'MIT') { throw 'VSIX package license must be MIT' }
-    $preRelease = $vsixManifest.PackageManifest.Metadata.Properties.Property |
-        Where-Object { $_.Id -ceq 'Microsoft.VisualStudio.Code.PreRelease' }
-    if ($null -eq $preRelease -or $preRelease.Value -cne 'true') { throw 'VSIX must be marked as a pre-release' }
+    # Stable VSIX files normally omit this property. XPath also handles an
+    # absent Properties element under StrictMode and the VSIX XML namespace.
+    $preRelease = $vsixManifest.SelectNodes('//*[local-name()="Property" and @Id="Microsoft.VisualStudio.Code.PreRelease"]')
+    foreach ($property in $preRelease) {
+        if ($property.GetAttribute('Value') -cne 'false') {
+            throw 'VSIX must be a stable release; PreRelease must be absent or false'
+        }
+    }
     # vsce normalizes the generated LICENSE filename when writing the VSIX.
     if ((Get-EntryHash $archive 'extension/LICENSE.txt') -cne $licenseHash) { throw 'VSIX LICENSE differs from the project LICENSE' }
     if ((Get-EntryHash $archive 'extension/server/sbdsl.exe') -cne $compilerHash) { throw 'VSIX server differs from CLI' }

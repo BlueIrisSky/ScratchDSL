@@ -366,7 +366,7 @@ pub fn templates() -> Vec<Template> {
     add(
         "control_wait",
         Command,
-        "等待 [DURATION] 秒",
+        "sleep [DURATION]",
         vec![num("DURATION")],
         false,
     );

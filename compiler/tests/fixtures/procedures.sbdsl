@@ -3,33 +3,24 @@ logs = {}
 resetlog = {"initial"}
 def 重置列表:
     resetlog = {"global"}
-end
 def 加分 数量: @n @warp:
     score += @n
-end
 def 公共入口:
     加分 数量: (2)
-end
 def 递归 次数: @n @warp:
     if <@n > 0>:
         将 ("tick") 加入 (logs)
         递归 次数: (@n - 1)
-    end
-end
 def 布尔测试 <@flag>:
     if <@flag>:
         score += 1
-    end
-end
 sprite "玩家":
     init:
         pass
-    end
     score = 100
     resetlog = {"private"}
     def 加分 数量: @n:
         score += @n
-    end
     start:
         加分 数量: (3)
         公共入口
@@ -41,5 +32,3 @@ sprite "玩家":
         fresh = {"one", 2}
         fresh = {}
         fresh = {"last"}
-    end
-end

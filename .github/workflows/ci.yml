@@ -162,7 +162,7 @@ jobs:
             fi
           else
             gh release create "$tag" --verify-tag --target "$GITHUB_SHA" \
-              --draft --prerelease --title "ScratchDSL $RELEASE_VERSION（过渡版）" --notes-file "$notes"
+              --draft --title "ScratchDSL $RELEASE_VERSION" --notes-file "$notes"
           fi
           gh release upload "$tag" dist/Install.exe dist/sbdsl.exe \
             "dist/scratchdsl-$RELEASE_VERSION-windows-x64.zip" \
@@ -170,5 +170,5 @@ jobs:
             dist/SHA256SUMS.txt dist/release-manifest.json dist/THIRD_PARTY_NOTICES.txt dist/LICENSE --clobber
           gh release view "$tag" --json assets > "$RUNNER_TEMP/uploaded-assets.json"
           python .github/scripts/release-assets.py "$RUNNER_TEMP/uploaded-assets.json"
-          gh release edit "$tag" --draft=false --prerelease --latest=false --target "$GITHUB_SHA" \
-            --title "ScratchDSL $RELEASE_VERSION（过渡版）" --notes-file "$notes"
+          gh release edit "$tag" --draft=false --prerelease=false --latest=true --target "$GITHUB_SHA" \
+            --title "ScratchDSL $RELEASE_VERSION" --notes-file "$notes"

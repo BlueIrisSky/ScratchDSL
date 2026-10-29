@@ -176,6 +176,13 @@ test('bare calls use no shape brackets while data configuration keeps array pair
   has(modern, '步', 'support.function.command.sbdsl');
 });
 
+test('sleep highlights its seconds input as an ordinary scalar command', () => {
+  const rows = tokenize('start:\n    sleep(1)\n    sleep(seconds)');
+  for (const row of rows.slice(1)) has(row, 'sleep', 'support.function.command.sbdsl');
+  has(rows[1], '1', 'constant.numeric.sbdsl');
+  has(rows[2], 'seconds', 'variable.other.readwrite.sbdsl');
+});
+
 test('Python suites and data arrays keep matching indentation rules', () => {
   const config = require('../language-configuration.json');
   const indent = new RegExp(config.indentationRules.increaseIndentPattern);
@@ -186,6 +193,14 @@ test('Python suites and data arrays keep matching indentation rules', () => {
   assert(!indent.test('说("text:")'));
   const dedent = new RegExp(config.indentationRules.decreaseIndentPattern);
   for (const text of ['    elif <true>:', '    else:', '    }', '    ]']) assert(dedent.test(text), text);
+  assert(!dedent.test('    end'));
+});
+
+test('end is no longer a structural keyword and literals retain their scopes', () => {
+  const rows = tokenize('start:\n    if <true>:\n        pass\n    end\nend\nend = 1\n说("end")');
+  for (const i of [3, 4, 5]) lacks(rows[i], 'end', 'keyword.control.');
+  has(rows[5], 'end', 'variable.other.readwrite.sbdsl');
+  has(rows[6], 'end', 'string.quoted.double.sbdsl');
 });
 
 test('extension C headers preserve namespaces, typed inputs and repeated branches', () => {
@@ -325,7 +340,7 @@ test('ordinary and quoted procedure parameter references keep their types', () =
 });
 
 test('procedure templates, events and control flow preserve fixed text', () => {
-  const rows = tokenize('def 前进 @n 判断 <@ok> @warp:\n    移动(@n)步\n当按下\'space\'键:\n    if <@ok>:\n        前进(2)<true>\n    elif <false>:\n        pass\n    else:\n        while true:\n            等待(1)秒');
+  const rows = tokenize('def 前进 @n 判断 <@ok> @warp:\n    移动(@n)步\n当按下\'space\'键:\n    if <@ok>:\n        前进(2)<true>\n    elif <false>:\n        pass\n    else:\n        while true:\n            sleep(1)');
   has(rows[0], '前进', 'entity.name.function.sbdsl');
   has(rows[0], '@warp', 'storage.modifier.sbdsl');
   has(rows[2], '当按下', 'keyword.control.event.sbdsl');

@@ -472,7 +472,7 @@ fn continuation_lines(source: &str) -> BTreeSet<usize> {
                 let recovery = crate::parser::assignment_parts(next).is_some()
                     || [
                         "var", "list", "global", "stage", "sprite", "init", "piece", "def",
-                        "import", "start", "if", "elif", "else", "loop", "while", "end",
+                        "import", "start", "if", "elif", "else", "loop", "while",
                     ]
                     .iter()
                     .any(|word| {
@@ -1128,8 +1128,7 @@ sprite "玩家":
     #[test]
     fn invalid_kind_changes_preserve_first_assignment_and_scope_kinds() {
         for (first, second, list) in [("1", "{}", false), ("{}", "1", true)] {
-            let source =
-                format!("start:\n    value = {first}\n    value = {second}\n    等待(|)秒");
+            let source = format!("start:\n    value = {first}\n    value = {second}\n    sleep(|)");
             let symbols = here(&source);
             assert_eq!(
                 names(&symbols.variables).contains(&("value".into(), true)),
@@ -1141,14 +1140,14 @@ sprite "玩家":
             );
 
             let source = format!(
-                "sprite \"A\":\n    init:\n        pass\n    value = {first}\nsprite \"B\":\n    init:\n        pass\n    start:\n        value = {second}\n        等待(|)秒"
+                "sprite \"A\":\n    init:\n        pass\n    value = {first}\nsprite \"B\":\n    init:\n        pass\n    start:\n        value = {second}\n        sleep(|)"
             );
             let symbols = here(&source);
             assert!(symbols.variables.is_empty(), "{source}");
             assert!(symbols.lists.is_empty(), "{source}");
 
             let source = format!(
-                "value = {first}\nsprite \"A\":\n    init:\n        pass\n    value = {second}\n    start:\n        等待(|)秒"
+                "value = {first}\nsprite \"A\":\n    init:\n        pass\n    value = {second}\n    start:\n        sleep(|)"
             );
             let symbols = here(&source);
             assert_eq!(

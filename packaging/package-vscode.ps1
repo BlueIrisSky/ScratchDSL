@@ -21,7 +21,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Plugin checks failed" }
     $manifest = Get-Content package.json -Raw -Encoding UTF8 | ConvertFrom-Json
     $output = Join-Path $repo "dist/scratchdsl-$($manifest.version)-win32-x64.vsix"
-    & $Npm exec --offline -- vsce package --target win32-x64 --pre-release --no-dependencies -o $output
+    & $Npm exec --offline -- vsce package --target win32-x64 --no-dependencies -o $output
     if ($LASTEXITCODE -ne 0) { throw "VSIX packaging failed" }
     Write-Host "Created $output"
 } finally { Pop-Location }

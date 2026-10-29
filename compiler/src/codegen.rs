@@ -625,9 +625,10 @@ mod tests {
         project
             .stage
             .pieces
-            .push((vec![command("等待 (1) 秒")], span()));
+            .push((vec![command("sleep(1.25)")], span()));
         let output = generate(&project, &Registry::new()).unwrap();
         let wait = opcode(&output, 0, "control_wait")[0].1;
+        assert_eq!(wait["inputs"]["DURATION"], json!([1, [4, "1.25"]]));
         assert_eq!(wait["topLevel"], true);
         assert!(wait["parent"].is_null());
         assert!(wait["next"].is_null());
@@ -644,7 +645,7 @@ mod tests {
                 Statement::Control {
                     header: "if <>".into(),
                     body: vec![command("说 (<false>)")],
-                    else_body: Some(vec![command("等待 (1) 秒")]),
+                    else_body: Some(vec![command("sleep(1)")]),
                     span: span(),
                 },
                 command("移动 (10) 步"),

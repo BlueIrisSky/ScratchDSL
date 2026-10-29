@@ -253,7 +253,7 @@ fn assignments_accept_values_and_reject_old_commands_and_invalid_targets() {
 
 #[test]
 fn assignment_contexts_spans_recovery_and_multiline_boundaries() {
-    let source = "def 改变 @value:\n    global:score = @value\nend\nstart:\n    计数 += 2\n    @value = 1\n    score =\n    score /= 2\nend\n";
+    let source = "def 改变 @value:\n    global:score = @value\nstart:\n    计数 += 2\n    @value = 1\n    score =\n    score /= 2\n";
     let report = parse_recovering(Path::new("assign.sbdsl"), source);
     assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
     let Item::Script { body, .. } = &report.items[1] else {
@@ -268,10 +268,10 @@ fn assignment_contexts_spans_recovery_and_multiline_boundaries() {
         panic!("expected assignment command");
     };
     assert_eq!(command, "计数 += 2");
-    assert_eq!((span.line, span.column), (5, 5));
+    assert_eq!((span.line, span.column), (4, 5));
     assert_eq!(&source[span.start..span.end], command);
-    assert_eq!(report.errors[0].span().unwrap().line, 6);
-    assert_eq!(report.errors[1].span().unwrap().line, 7);
+    assert_eq!(report.errors[0].span().unwrap().line, 5);
+    assert_eq!(report.errors[1].span().unwrap().line, 6);
 
     let mut source = String::from("start:\n");
     for _ in 0..100 {
@@ -287,7 +287,7 @@ fn assignment_contexts_spans_recovery_and_multiline_boundaries() {
     ] {
         source.push_str(&format!("    flag = {expression}\n"));
     }
-    source.push_str("    说 (flag)\nend\n");
+    source.push_str("    说 (flag)\n");
     let items = parse(Path::new("assign.sbdsl"), &source).unwrap();
     let Item::Script { body, .. } = &items[0] else {
         panic!("expected start script");
@@ -393,7 +393,7 @@ fn bare_and_qualified_references_keep_names_scopes_and_template_precedence() {
         assert!(
             parse(
                 Path::new("test.sbdsl"),
-                &format!("start:\n    if {value}:\n        说 (1)\n    end\nend\n")
+                &format!("start:\n    if {value}:\n        说 (1)\n")
             )
             .is_ok()
         );
@@ -439,7 +439,7 @@ fn typed_matching_and_inferred_data_kinds_resolve_lists_and_reject_conversions()
     }
 
     let project = compile(
-        "score = 10\nitems = {1, \"two\"}\nstart:\n    fresh = {3, \"four\"}\n    score += 1\n    fresh = {}\nend\n",
+        "score = 10\nitems = {1, \"two\"}\nstart:\n    fresh = {3, \"four\"}\n    score += 1\n    fresh = {}\n",
     )
     .unwrap();
     let stage = &project.json["targets"][0];
@@ -489,7 +489,7 @@ fn typed_matching_and_inferred_data_kinds_resolve_lists_and_reject_conversions()
     assert_parent_edges(blocks);
 
     let project = compile(
-        "def reset:\n    entries = {\"global\"}\nend\nsprite \"player\":\n    init:\n        pass\n    end\n    entries = {\"private\"}\n    start:\n        score = ((future) 的项目数)\n        if <score = 0>:\n            future = {1}\n        end\n        entries = {\"changed\"}\n        reset\n    end\nend\n",
+        "def reset:\n    entries = {\"global\"}\nsprite \"player\":\n    init:\n        pass\n    entries = {\"private\"}\n    start:\n        score = ((future) 的项目数)\n        if <score = 0>:\n            future = {1}\n        entries = {\"changed\"}\n        reset\n",
     )
     .unwrap();
     let global_id = project.json["targets"][0]["lists"]
@@ -532,15 +532,15 @@ fn data_kind_conflicts_and_live_diagnostics_are_enforced_across_scopes() {
     for source in [
         "name = 1\nname = {}\n",
         "name = {}\nname = 1\n",
-        "start:\n    name = 1\n    name = {}\nend\n",
-        "start:\n    name = {}\n    name = 1\nend\n",
-        "start:\n    name = {}\n    name += 1\nend\n",
-        "name = {}\nstart:\n    name = 1\nend\n",
-        "name = 1\nstart:\n    name = {}\nend\n",
-        "name = 1\nsprite \"a\":\n    init:\n        pass\n    end\n    name = {}\nend\n",
-        "sprite \"a\":\n    init:\n        pass\n    end\n    name = 1\nend\nstart:\n    name = {}\nend\n",
-        "sprite \"甲\":\n    init:\n        pass\n    end\n    value = {}\nend\nsprite \"乙\":\n    init:\n        pass\n    end\n    start:\n        value = 1\n    end\nend\n",
-        "sprite \"玩家\":\n    init:\n        pass\n    end\n    value = 1\nend\nsprite \"玩家\" add:\n    value = {}\nend\n",
+        "start:\n    name = 1\n    name = {}\n",
+        "start:\n    name = {}\n    name = 1\n",
+        "start:\n    name = {}\n    name += 1\n",
+        "name = {}\nstart:\n    name = 1\n",
+        "name = 1\nstart:\n    name = {}\n",
+        "name = 1\nsprite \"a\":\n    init:\n        pass\n    name = {}\n",
+        "sprite \"a\":\n    init:\n        pass\n    name = 1\nstart:\n    name = {}\n",
+        "sprite \"甲\":\n    init:\n        pass\n    value = {}\nsprite \"乙\":\n    init:\n        pass\n    start:\n        value = 1\n",
+        "sprite \"玩家\":\n    init:\n        pass\n    value = 1\nsprite \"玩家\" add:\n    value = {}\n",
     ] {
         let error = compile(source).unwrap_err();
         assert!(error.span().is_some(), "{source}: {error}");
@@ -563,7 +563,7 @@ fn data_kind_conflicts_and_live_diagnostics_are_enforced_across_scopes() {
     assert_eq!(error.span().unwrap().line, 2);
 
     let main = directory.path().join("main.sbdsl");
-    let source = "score = 1\nscore = {}\nlogs = {}\nstart:\n    logs = 1\n    score = logs\n    将 (1) 加入 (score)\n    score += 1\nend\n";
+    let source = "score = 1\nscore = {}\nlogs = {}\nstart:\n    logs = 1\n    score = logs\n    将 (1) 加入 (score)\n    score += 1\n";
     let mut overlays = BTreeMap::from([(main.clone(), source.into())]);
     let mut cache = AnalysisCache::default();
     let result = analyze_document(&main, &overlays, &mut cache, true);
@@ -584,7 +584,7 @@ fn data_kind_conflicts_and_live_diagnostics_are_enforced_across_scopes() {
     }
     overlays.insert(
         main.clone(),
-        "score = 1\nlogs = {}\nstart:\n    score = ((logs) 的项目数)\n    将 (score) 加入 (logs)\nend\n"
+        "score = 1\nlogs = {}\nstart:\n    score = ((logs) 的项目数)\n    将 (score) 加入 (logs)\n"
             .into(),
     );
     let corrected = analyze_document(&main, &overlays, &mut cache, true);
@@ -599,8 +599,8 @@ fn data_kind_conflicts_and_live_diagnostics_are_enforced_across_scopes() {
 fn slot_shells_leading_inputs_and_boolean_statement_boundaries() {
     let mut registry = Registry::new();
     for source in [
-        "等待(1)秒",
-        "等待 (1) 秒",
+        "sleep(1)",
+        "sleep (1)",
         "说(连接(\"你好\")和(\"世界\"))",
         "说(score)",
         "说(a+b*2)",
@@ -611,9 +611,9 @@ fn slot_shells_leading_inputs_and_boolean_statement_boundaries() {
         registry.parse(source, Shape::Command, &[]).unwrap();
     }
     for source in [
-        "[等待 1 秒]",
-        "等待1秒",
-        "等待 1 秒",
+        "[sleep 1]",
+        "sleep1",
+        "sleep 1",
         "说\"你好\"",
         "说 score",
         "说(连接\"a\"和\"b\")",
@@ -659,14 +659,11 @@ fn slot_shells_leading_inputs_and_boolean_statement_boundaries() {
         "等待直到<score >\n        (limit)>",
         "等待直到<score >\n        (x 坐标)>",
         "等待直到<score >\nlimit\n>",
-        "等待(1)秒",
+        "sleep(1)",
     ];
     for newline in ["\n", "\r\n"] {
-        let source = format!(
-            "start:\n    {} # final\nend\n",
-            commands.join(" # next\n    ")
-        )
-        .replace('\n', newline);
+        let source = format!("start:\n    {} # final\n", commands.join(" # next\n    "))
+            .replace('\n', newline);
         let parsed = parse(Path::new("boundaries.sbdsl"), &source).unwrap();
         let recovering = parse_recovering(Path::new("boundaries.sbdsl"), &source);
         assert!(recovering.errors.is_empty(), "{:?}", recovering.errors);
@@ -699,11 +696,9 @@ logs = {"开始", 1, "开始"}
 sprite "玩家":
     init:
         x: -100
-    end
     score = 0
     def 增加 @amount:
         score += @amount
-    end
     start:
         score = global:score
         score = (a + b - c * d / f % e)
@@ -715,16 +710,11 @@ sprite "玩家":
             说 ("低")
         else:
             说 ("零")
-        end
         while <score < 3>:
             score += 1
-        end
         while true:
             增加 (1)
-        end
         停止 'this script'
-    end
-end
 "#,
     )
     .unwrap();
@@ -798,8 +788,8 @@ end
     assert_parent_edges(blocks.as_object().unwrap());
 
     for source in [
-        "当绿旗被点击 { 等待 (1) 秒 }",
-        "start { 等待 (1) 秒 }",
+        "当绿旗被点击 { sleep (1) }",
+        "start { sleep (1) }",
         "var score = 0\n",
         "list logs = {}\n",
         "logs = []\n",
@@ -812,8 +802,8 @@ end
         "start:\n    until <true>:\n        pass\n",
         "start:\n    停止 /'全部脚本'/\n",
         "start:\n    说 (7 mod 3)\n",
-        "start:\n    [等待 (1) 秒]\n",
-        "start:\n    等待 1 秒\n",
+        "start:\n    [sleep (1)]\n",
+        "start:\n    sleep 1\n",
     ] {
         assert!(compile(source).is_err(), "accepted old syntax: {source}");
     }
